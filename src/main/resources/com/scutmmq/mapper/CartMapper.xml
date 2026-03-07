@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+<mapper namespace="com.scutmmq.mapper.CartMapper">
+    <select id="getCarts" resultMap="CartsResultMap">
+        select ci.id cart_itemsId,c.user_id userId,c.id cartId,
+               m.id merchantId,m.name merchantName,
+               p.id productId,p.name,p.image_url, ci.quantity, p.price,
+               p.price*ci.quantity as subtotal,sum(p.price*ci.quantity)over () totalPrice
+        from cart_items ci
+        join  carts c on ci.cart_id = c.id
+        join product p on ci.product_id = p.id
+        join merchant m on p.merchant_id = m.id
+        where user_id = #{userId}
+    </select>
+    <!--结果映射-->
+    <resultMap id="CartsResultMap" type="com.scutmmq.vo.CartsItemsVO">
+        <id column="cartId" property="cartId"/>
+        <result column="userId" property="userId"/>
+        <result column="totalPrice" property="totalPrice"/>
+
+        <!--嵌套product信息-->
+        <collection property="list" ofType="com.scutmmq.vo.CartsItemsVO$Merchant">
+            <id column="merchantId" property="merchantId"/>
+            <result column="merchantName" property="merchantName"/>
+            <collection property="productList" ofType="com.scutmmq.vo.CartsItemsVO$CartsOfProduct">
+                <id column="cart_itemsId" property="cartItemsId"/>
+                <result column="productId" property="productId"/>
+                <result column="name" property="name"/>
+                <result column="image_url" property="imageUrl"/>
+                <result column="quantity" property="quantity"/>
+                <result column="price" property="price"/>
+                <result column="subtotal" property="subtotal"/>
+            </collection>
+        </collection>
+        
+    </resultMap>
+
+</mapper>

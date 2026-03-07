@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+<mapper namespace="com.scutmmq.mapper.ProductMapper">
+<select id="getProducts" resultType="com.scutmmq.vo.ProductVO">
+    select p.*,
+           m.name merchantName,
+           pc.name categoryName,p.rating_count,p.rating
+    from product p
+    join merchant m on p.merchant_id = m.id
+    join product_category pc on p.category_id = pc.id
+    where 1=1
+        <if test="categoryId != null">and p.category_id = #{categoryId}</if>
+        <if test="keyword != null and keyword !='' ">and p.name like concat("%",#{keyword},"%")</if>
+        <if test="minPrice !=null and maxPrice != null">and p.price between #{minPrice} and #{maxPrice} </if>
+        <if test="isActive != null"> and p.is_active = #{isActive}</if>
+    order by p.rating desc
+</select>
+    <select id="getListByIds" resultType="com.scutmmq.vo.ProductVO">
+        select
+        p.*,
+        p.rating,
+        p.rating_count,
+        m.rating as merchantRating,
+        m.rating_count as merchantRatingCount,
+        m.name as merchantName,
+        pc.name as categoryName
+        from product p
+        join merchant m on p.merchant_id = m.id
+        join product_category pc on p.category_id = pc.id
+        where p.id in
+        <foreach collection="productIds" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+    <select id="getProductsOfMe" resultType="com.scutmmq.vo.ProductVO">
+        select
+            p.*,
+            p.rating,
+            p.rating_count,
+            m.rating as merchantRating,
+            m.rating_count as merchantRatingCount,
+            m.name as merchantName,
+            pc.name as categoryName
+        from product p
+                 join merchant m on p.merchant_id = m.id
+                 join product_category pc on p.category_id = pc.id
+        where p.merchant_id=#{merchantId}
+    </select>
+    <select id="getProductDetail" resultMap="ProductDetailResultMap">
+        SELECT
+            p.id product_id,
+            p.name product_name,
+            p.description,
+            p.price,
+            p.stock_quantity,
+            p.category_id,
+            p.sku,
+            p.image_url,
+            p.is_active,
+            p.merchant_id,
+            p.created_time,
+            p.favorite,
+            p.rating AS product_rating,
+            p.rating_count AS product_rating_count,
+            -- 商家信息
+            m.id AS merchant_id,
+            m.name AS merchant_name,
+            m.rating AS merchant_rating,
+            m.rating_count AS merchant_rating_count,
+            m.total_sales AS merchant_total_sales,
+            m.logo_url as merchant_logo_url,
+            -- 当前分类信息
+            c.id AS category_id,
+            c.name AS category_name,
+            c.parent_id AS category_parent_id,
+            -- 父分类信息（通过当前分类的parent_id关联）
+            pc.id AS parent_category_id,
+            pc.name AS parent_category_name
+        FROM
+            product p
+                -- 关联商家表
+                LEFT JOIN
+            merchant m ON p.merchant_id = m.id
+                -- 关联当前分类表
+                LEFT JOIN
+            product_category c ON p.category_id = c.id
+                -- 关联父分类表（通过当前分类的parent_id）
+                LEFT JOIN
+            product_category pc ON c.parent_id = pc.id
+        WHERE
+            p.id = #{productId}
+    </select>
+
+    <!-- 结果映射：将查询结果映射到 ProductDetailDTO -->
+    <resultMap id="ProductDetailResultMap" type="com.scutmmq.vo.ProductDetailVO">
+        <!-- 商品基本信息 -->
+        <id column="product_id" property="id"/>
+        <result column="product_name" property="name"/>
+        <result column="description" property="description"/>
+        <result column="price" property="price"/>
+        <result column="stock_quantity" property="stockQuantity"/>
+        <result column="category_id" property="categoryId"/>
+        <result column="sku" property="sku"/>
+        <result column="image_url" property="imageUrl"/>
+        <result column="is_active" property="isActive"/>
+        <result column="merchant_id" property="merchantId"/>
+        <result column="created_time" property="createdTime"/>
+        <result column="favorite" property="favorite"/>
+        <result column="product_rating" property="rating"/>
+        <result column="product_rating_count" property="ratingCount"/>
+
+        <!-- 嵌套商家信息（映射到 MerchantSimpleDTO） -->
+        <association property="merchant" javaType="com.scutmmq.vo.ProductDetailVO$MerchantSimpleDTO">
+            <id column="merchant_id" property="id"/>
+            <result column="merchant_name" property="name"/>
+            <result column="merchant_rating" property="merchantRating"/>
+            <result column="merchant_rating_count" property="merchantRatingCount"/>
+            <result column="merchant_total_sales" property="totalSales"/>
+            <result column="merchant_logo_url" property="logoUrl"/>
+        </association>
+
+        <!-- 嵌套分类信息（映射到 CategoryDetailDTO） -->
+        <association property="category" javaType="com.scutmmq.vo.ProductDetailVO$CategoryDetailDTO">
+            <id column="category_id" property="id"/>
+            <result column="category_name" property="name"/>
+
+            <!-- 嵌套父分类信息（映射到 ParentCategoryDTO） -->
+            <association property="parentCategory" javaType="com.scutmmq.vo.ProductDetailVO$CategoryDetailDTO$ParentCategoryDTO">
+                <id column="parent_category_id" property="id"/>
+                <result column="parent_category_name" property="name"/>
+            </association>
+        </association>
+    </resultMap>
+</mapper>

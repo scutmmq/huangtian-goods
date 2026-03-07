@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+<mapper namespace="com.scutmmq.mapper.ReturnAuditMapper">
+    <select id="getAudits" resultMap="UserOrdersResultMap">
+        select
+        distinct o.id,o.order_number,o.total_amount,o.status,o.payment_status,o.ordered_time,
+        o.billing_address_id as billing_address_id,o.shipping_address_id as shipping_address_id,
+        o.shipped_time as shipped_time,o.delivered_time as deliver_time,
+        o.shipping_method as ship_type,o.tracking_number as tracking_number,
+        oi.product_id,oi.product_name,oi.product_price,oi.quantity,p.image_url,
+        m.id as merchantId, m.name as merchantName,
+        ra.id auditId,ra.return_reason,ra.return_images,ra.audit_time,ra.apply_time,ra.audit_reason,ra.audit_status
+        from orders o
+        join order_items oi on o.id = oi.order_id
+        join product p on oi.product_id = p.id
+        join merchant m on p.merchant_id = m.id
+        join return_audit ra on ra.order_id = o.id
+        where
+            o.user_id = #{userId}
+        <if test="auditStatus !=null">and ra.audit_status = #{auditStatus}</if>
+        order by apply_time desc
+    </select>
+
+    <select id="getMerchantAudits" resultMap="MerchantOrdersResultMap">
+        select
+            distinct o.id,o.order_number,o.total_amount,o.status,o.payment_status,o.ordered_time,
+                     o.billing_address_id as billing_address_id,o.shipping_address_id as shipping_address_id,
+                     o.shipped_time as shipped_time,o.delivered_time as deliver_time,
+                     o.shipping_method as ship_type,o.tracking_number as tracking_number,
+                     oi.product_id,oi.product_name,oi.product_price,oi.quantity,p.image_url,
+                     u.nick_name,u.image as customerImage,
+                    m.id as merchantId, m.name as merchantName,
+                     ra.id auditId,ra.return_reason,ra.return_images,ra.audit_time,ra.apply_time,ra.audit_reason,ra.audit_status
+        from orders o
+                 join order_items oi on o.id = oi.order_id
+                 join product p on oi.product_id = p.id
+                 join merchant m on p.merchant_id = m.id
+                 join return_audit ra on ra.order_id = o.id
+                join  user u on o.user_id = u.id
+        where
+            o.merchant_id = #{merchantId}
+        <if test="auditStatus !=null">and ra.audit_status = #{auditStatus}</if>
+        order by apply_time desc
+    </select>
+
+
+    <resultMap id="UserOrdersResultMap" type="com.scutmmq.vo.AuditVO">
+        <id column="id" property="id"/>
+        <result column="order_number" property="orderNumber"/>
+        <result column="total_amount" property="totalAmount"/>
+        <result column="status" property="status"/>
+        <result column="payment_status" property="paymentStatus"/>
+        <result column="ordered_time" property="orderedTime"/>
+        <result column="billing_address_id" property="billingAddressId"/>
+        <result column="shipping_address_id" property="shippingAddressId"/>
+        <result column="shipped_time" property="shippedTime"/>
+        <result column="deliver_time" property="deliveredTime"/>
+        <result column="ship_type" property="shipType"/>
+        <result column="tracking_number" property="trackingNumber"/>
+        <result column="merchantId" property="merchantId"/>
+        <result column="merchantName" property="merchantName"/>
+        <association property="audit">
+            <id column="auditId" property="auditId"/>
+            <result column="audit_status" property="auditStatus"/>
+            <result column="return_images" property="returnImage"/>
+            <result column="return_reason" property="returnReason"/>
+            <result column="apply_time" property="applyTime"/>
+            <result column="audit_time" property="auditTime"/>
+            <result column="audit_reason" property="auditReason"/>
+        </association>
+        <collection property="items" ofType="com.scutmmq.vo.AuditVO$OrderProduct">
+            <id column="product_id" property="productId"/>
+            <result column="product_name" property="productName"/>
+            <result column="product_price" property="productPrice"/>
+            <result column="quantity" property="quantity"/>
+            <result column="image_url" property="imageUrl"/>
+        </collection>
+    </resultMap>
+
+
+    <resultMap id="MerchantOrdersResultMap" type="com.scutmmq.vo.AuditVO">
+        <id column="id" property="id"/>
+        <result column="order_number" property="orderNumber"/>
+        <result column="total_amount" property="totalAmount"/>
+        <result column="status" property="status"/>
+        <result column="payment_status" property="paymentStatus"/>
+        <result column="ordered_time" property="orderedTime"/>
+        <result column="billing_address_id" property="billingAddressId"/>
+        <result column="shipping_address_id" property="shippingAddressId"/>
+        <result column="shipped_time" property="shippedTime"/>
+        <result column="deliver_time" property="deliveredTime"/>
+        <result column="ship_type" property="shipType"/>
+        <result column="tracking_number" property="trackingNumber"/>
+        <result column="nick_name" property="customerNickName"/>
+        <result column="customerImage" property="customerImage"/>
+        <result column="merchantId" property="merchantId"/>
+        <result column="merchantName" property="merchantName"/>
+        <association property="audit">
+            <id column="auditId" property="auditId"/>
+            <result column="audit_status" property="auditStatus"/>
+            <result column="return_images" property="returnImage"/>
+            <result column="return_reason" property="returnReason"/>
+            <result column="apply_time" property="applyTime"/>
+            <result column="audit_time" property="auditTime"/>
+            <result column="audit_reason" property="auditReason"/>
+        </association>
+        <collection property="items" ofType="com.scutmmq.vo.AuditVO$OrderProduct">
+            <id column="product_id" property="productId"/>
+            <result column="product_name" property="productName"/>
+            <result column="product_price" property="productPrice"/>
+            <result column="quantity" property="quantity"/>
+            <result column="image_url" property="imageUrl"/>
+        </collection>
+    </resultMap>
+</mapper>

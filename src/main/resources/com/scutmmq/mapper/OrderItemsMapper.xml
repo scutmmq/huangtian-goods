@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+<mapper namespace="com.scutmmq.mapper.OrderItemsMapper">
+    <select id="getProductIdsByOrderId" resultType="long">
+        select product_id,qu from order_items where order_id = #{orderId}
+    </select>
+    <select id="getItemsByOrderId" resultType="com.scutmmq.vo.OrderItemsVO">
+        select oi.* ,o.order_number,o.shipping_address_id,o.billing_address_id,p.image_url from order_items oi
+        join orders o on oi.order_id = o.id
+        join product p on oi.product_id = p.id
+        where oi.order_id = #{orderId}
+    </select>
+</mapper>

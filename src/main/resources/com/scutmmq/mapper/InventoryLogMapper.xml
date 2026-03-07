@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+<mapper namespace="com.scutmmq.mapper.InventoryLogMapper">
+<select id="getLogByProductIds" resultType="com.scutmmq.vo.InventoryLogVO">
+    select p.name productName,il.change_type,il.change_quantity,il.current_quantity,il.reason,il.reference_id,il.created_time
+    from inventory_logs il
+    join product p on il.product_id = p.id
+    where il.product_id in
+    <foreach collection="productIds" item="id" open="(" separator="," close=")">
+        #{id}
+    </foreach>
+        <if test="changeType!=null and changeType !=''">and il.change_type=#{changeType}</if>
+        <if test="startDate!=null and endDate!=null">and il.created_time between #{startDate} and #{endDate}</if>
+    order by created_time desc
+</select>
+</mapper>

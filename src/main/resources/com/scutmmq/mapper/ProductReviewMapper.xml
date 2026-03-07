@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+<mapper namespace="com.scutmmq.mapper.ProductReviewMapper">
+
+    <!-- 结果映射：将查询结果映射到 ProductReviewVO -->
+    <resultMap id="ProductReviewResultMap" type="com.scutmmq.vo.ProductReviewVO">
+        <!-- 评论基本信息 -->
+        <id column="id" property="id"/>
+        <result column="user_id" property="userId"/>
+        <result column="product_id" property="productId"/>
+        <result column="order_id" property="orderId"/>
+        <result column="order_item_id" property="orderItemId"/>
+        <result column="content" property="content"/>
+        <result column="image" property="image"/>
+        <result column="rating" property="rating"/>
+        <result column="review_time" property="reviewTime"/>
+        <result column="merchant_reply" property="merchantReply"/>
+        <result column="reply_time" property="replyTime"/>
+        <result column="create_time" property="createTime"/>
+        <result column="update_time" property="updateTime"/>
+        <result column="merchant_name" property="merchantName"/>
+        <result column="merchant_logo_url" property="merchantLogoUrl"/>
+        
+        <!-- 关联的用户信息 -->
+        <association property="user" javaType="com.scutmmq.vo.ProductReviewVO$UserSimpleInfo">
+            <id column="user_id" property="id"/>
+            <result column="nick_name" property="nickName"/>
+            <result column="user_image" property="avatarUrl"/>
+        </association>
+        
+        <!-- 关联的商品信息 -->
+        <association property="product" javaType="com.scutmmq.vo.ProductReviewVO$ProductSimpleInfo">
+            <id column="product_id" property="id"/>
+            <result column="product_name" property="name"/>
+            <result column="product_image_url" property="imageUrl"/>
+        </association>
+    </resultMap>
+
+    <!-- 根据用户ID查询该用户的所有商品评价 -->
+    <select id="getReviewsByUserId" resultMap="ProductReviewResultMap">
+        SELECT
+            pr.*,
+            u.nick_name,
+            u.image as user_image,
+            p.name AS product_name,
+            p.image_url AS product_image_url,
+            m.name as merchant_name,
+            m.logo_url as merchant_logo_url
+        FROM product_review pr
+        LEFT JOIN user u ON pr.user_id = u.id
+        LEFT JOIN product p ON pr.product_id = p.id
+        left join merchant m on p.merchant_id = m.id
+        WHERE pr.user_id = #{userId}
+        ORDER BY pr.review_time DESC
+    </select>
+
+    <!-- 根据商品ID查询该商品的所有评价 -->
+    <select id="getReviewsByProductId" resultMap="ProductReviewResultMap">
+        SELECT
+            pr.*,
+            u.nick_name,
+            u.image as user_image,
+            p.name AS product_name,
+            p.image_url AS product_image_url,
+            m.name as merchant_name,m.logo_url as merchant_logo_url
+        FROM product_review pr
+        LEFT JOIN user u ON pr.user_id = u.id
+        LEFT JOIN product p ON pr.product_id = p.id
+        left join merchant m on p.merchant_id = m.id
+        WHERE pr.product_id = #{productId}
+        ORDER BY pr.review_time DESC
+    </select>
+
+    <!-- 根据商家ID查询该商家收到的所有评价 -->
+    <select id="getReviewsByMerchantId" resultMap="ProductReviewResultMap">
+        SELECT
+            pr.*,
+            u.nick_name,
+            u.image as user_image,
+            p.name AS product_name,
+            p.image_url AS product_image_url,
+            m.name as merchant_name,m.logo_url as merchant_logo_url
+        FROM product_review pr
+        LEFT JOIN user u ON pr.user_id = u.id
+        LEFT JOIN product p ON pr.product_id = p.id
+        left join merchant m on p.merchant_id = m.id
+        WHERE p.merchant_id = #{merchantId}
+        ORDER BY pr.review_time DESC
+    </select>
+</mapper>

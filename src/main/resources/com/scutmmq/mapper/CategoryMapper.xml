@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+<mapper namespace="com.scutmmq.mapper.CategoryMapper">
+<select id="getCategories" resultType="com.scutmmq.entity.Category">
+    select pc1.* from product_category pc1 join product_category pc2 on  pc1.parent_id = pc2.id
+    where pc1.level=#{level} and pc1.parent_id = #{parentId}
+</select>
+</mapper>
