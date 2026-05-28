@@ -42,15 +42,10 @@ public class RefreshInterceptor implements HandlerInterceptor {
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
 
-        log.info("访问路径:{}",request.getRequestURL());
-
         // 获取 token
         String token = request.getHeader("Authorization");
 
-        log.info("获取token:{}",token);
-
         if(token==null||token.isEmpty()){
-            log.info("token为空,认证失败");
             return  true;
         }
 
@@ -64,26 +59,21 @@ public class RefreshInterceptor implements HandlerInterceptor {
             // 获取jwt令牌
             Claims claims = JwtUtils.parseJwtToken(token);
             UserDTO userDTO = BeanUtil.fillBeanWithMap(claims,new UserDTO(),true);
-            log.info("解析token通过,解析后的token:{}",claims);
 
             // 令牌通过，判断redis是否存在令牌
             final Boolean hasKey = stringRedisTemplate.hasKey(TOKEN_KEY + token);
 
             if(!hasKey){
                 // 不存在，不更新令牌，不存threadLocal
-                log.info("此令牌已入黑名单");
                 return  true;
             }
             // 计算令牌过期时间
             long tokenExpire = claims.getExpiration().getTime()-System.currentTimeMillis() ;
             Long redisExpire = stringRedisTemplate.getExpire(TOKEN_KEY + token, TimeUnit.MILLISECONDS);
-            log.info("令牌过期时间:{}ms , redis存储令牌过期时间:{}ms",tokenExpire,redisExpire);
 
             if(claims.getExpiration().getTime()<1000*60*20||redisExpire<1000*60*20){
-                log.info("令牌有效期小于20分钟，需要刷新令牌");
                 // 刷新令牌
                 final String newToken = JwtUtils.generateJwtToken(claims);
-                log.info("更新后的token:{}",newToken);
                 userDTO.setToken(newToken);
                 // 存用户进入threadLocal
                 UserHolder.saveUser(userDTO);
@@ -98,7 +88,6 @@ public class RefreshInterceptor implements HandlerInterceptor {
                 stringRedisTemplate.expire(TOKEN_KEY+token,10, TimeUnit.SECONDS);
                 return true;
             }
-            log.info("令牌有效期长，不需要刷新");
             userDTO.setToken(token);
             UserHolder.saveUser(userDTO);
 

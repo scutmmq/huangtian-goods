@@ -360,3 +360,49 @@ UNLOCK TABLES;
 /*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
+-- =============================================================
+-- AI Assistant 模块 (online-mall AI 购物助手)
+-- =============================================================
+
+DROP TABLE IF EXISTS `ai_session`;
+CREATE TABLE `ai_session` (
+  `id` varchar(36) NOT NULL,
+  `user_id` bigint unsigned NOT NULL,
+  `title` varchar(200) NOT NULL DEFAULT '新会话',
+  `message_count` int NOT NULL DEFAULT 0,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_user_updated` (`user_id`, `updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+DROP TABLE IF EXISTS `ai_message`;
+CREATE TABLE `ai_message` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `session_id` varchar(36) NOT NULL,
+  `role` varchar(16) NOT NULL,
+  `content` text NOT NULL,
+  `metadata_json` json DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_session` (`session_id`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+DROP TABLE IF EXISTS `ai_action_draft`;
+CREATE TABLE `ai_action_draft` (
+  `id` varchar(36) NOT NULL,
+  `user_id` bigint unsigned NOT NULL,
+  `session_id` varchar(36) NOT NULL,
+  `action_type` varchar(32) NOT NULL,
+  `title` varchar(200) NOT NULL,
+  `summary` text NOT NULL,
+  `payload_json` json NOT NULL,
+  `status` varchar(16) NOT NULL DEFAULT 'PENDING',
+  `result_json` json DEFAULT NULL,
+  `error_message` text,
+  `expires_at` datetime NOT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_user_status` (`user_id`, `status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

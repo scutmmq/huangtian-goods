@@ -1,0 +1,18 @@
+spring:
+  datasource:
+    url: ${MYSQL_URL:jdbc:mysql://119.23.76.234:3306/online_mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: ${MYSQL_USERNAME:root}
+    password: ${MYSQL_PASSWORD:2004momingqin}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DATABASE:1}
+      lettuce:
+        pool:
+          max-active: 20
+          max-idle: 20
+          min-idle: 2
+          time-between-eviction-runs: 10s
