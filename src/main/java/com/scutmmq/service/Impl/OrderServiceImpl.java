@@ -132,6 +132,9 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
                     return Result.error("下单过忙，请重试");
                 }
                 log.info("获取锁{}成功",key);
+                // 确保 Redis 有该商品库存快照（AI下单等场景可能跳过商品详情页，导致 key 不存在）
+                // 持锁内同步，保证原子性：synchronizeUpdateStock 会用 DB 当前值减去已有预占，写入 available key
+                redisUtils.synchronizeUpdateStock(product.getId(), product.getStockQuantity());
                 // TODO 调用LUA脚本查询库存，预占库存
                 Long flag = redisUtils.ReserveStock(
                         orderItemsDTO.getProductId(), orderItemsDTO.getQuantity(), tempOrderId);
