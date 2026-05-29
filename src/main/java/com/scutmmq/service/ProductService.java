@@ -22,4 +22,6 @@ public interface ProductService extends IService<Product> {
     Result getProductsOfMe();
 
     Result modifyStockQuantity(InventoryDTO inventoryDTO);
+
+    Result adjustStockByMerchant(InventoryDTO inventoryDTO);
 }

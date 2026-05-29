@@ -85,7 +85,6 @@ public class ProductServiceImpl extends ServiceImpl<ProductMapper, Product> impl
                         .opsForValue()
                         .set(CACHE_PRODUCT_DETAIL+productId
                         , JSONUtil.toJsonStr(productDetail),CACHE_PRODUCT_DETAIL_EXPIRATION,CACHE_PRODUCT_DETAIL_UNIT);
-                System.out.println(isProductLiked(productId));
                 return Result.success(productDetail);
             }
             return Result.error("获取商品失败");
@@ -160,9 +159,10 @@ public class ProductServiceImpl extends ServiceImpl<ProductMapper, Product> impl
         if(merchant_id == null){
             return Result.error("您未注册商户,请先注册商户");
         }
-        // 更新数据
+        // 更新数据（归属校验：限定 merchantId，只能改本店商品）
         final boolean updated = lambdaUpdate()
                 .eq(Product::getId, product.getId())
+                .eq(Product::getMerchantId, merchant_id)
                 .set(product.getName() != null && !product.getName().isEmpty(), Product::getName, product.getName())
                 .set(product.getDescription() != null, Product::getDescription, product.getDescription())
                 .set(product.getPrice() != null, Product::getPrice, product.getPrice())
@@ -172,7 +172,7 @@ public class ProductServiceImpl extends ServiceImpl<ProductMapper, Product> impl
                 .set(product.getIsActive()!=null,Product::getIsActive,product.getIsActive())
                 .update();
         if(!updated){
-            return Result.error("更新失败，请查询错误");
+            return Result.error("更新失败：商品不存在或无权修改");
         }
         // 删除商品详情缓存
         stringRedisTemplate.delete(CACHE_PRODUCT_DETAIL+product.getId());
@@ -189,6 +189,28 @@ public class ProductServiceImpl extends ServiceImpl<ProductMapper, Product> impl
         Long merchantId = merchantUserMapper.getMerchantIdByUserId(userId);
         List<ProductVO> productVOS =productMapper.getProductsOfMe(merchantId);
         return Result.success(productVOS);
+    }
+
+    /**
+     * 商家手动调整库存入口：先校验商品归属当前商家，再委托 modifyStockQuantity。
+     * 注意：支付扣减、退货回补等系统内部流程仍直接调用 modifyStockQuantity，
+     * 因为那些场景下的操作人是买家或系统，不应套用商家归属校验。
+     * @param inventoryDTO 库存变更参数
+     * @return 结果
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Result adjustStockByMerchant(InventoryDTO inventoryDTO) {
+        Long userId = UserHolder.getUser().getId();
+        Long merchantId = merchantUserMapper.getMerchantIdByUserId(userId);
+        if(merchantId == null){
+            return Result.error("您未注册商户，无权修改库存");
+        }
+        final Product product = getById(inventoryDTO.getProductId());
+        if(product == null || !merchantId.equals(product.getMerchantId())){
+            throw new BusinessException("无权操作该商品库存");
+        }
+        return modifyStockQuantity(inventoryDTO);
     }
 
     /**

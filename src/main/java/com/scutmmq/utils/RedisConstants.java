@@ -26,6 +26,7 @@ public class RedisConstants {
     public static final String PRODUCT_STOCK_AVAILABLE = "product:stock:available:";// + productId
     public static final String LOCK_STOCK = "lock:stock:"; // +productId
     public static final String ORDER_ID_MAP_TO_TEMP_ID = "order:id:map:to:temp:id";
+    public static final String ORDER_SUBMIT_DEDUP = "order:submit:dedup:"; // + 指纹，下单幂等短窗口去重
 
     // 超时订单管理
     public static final String ORDER_TIMEOUT_TRIGGER = "order:timeout:trigger";

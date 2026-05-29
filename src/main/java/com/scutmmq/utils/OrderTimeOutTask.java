@@ -158,7 +158,6 @@ public class OrderTimeOutTask {
             // 更新订单状态
             orders.setStatus(OrderStatus.CANCELLED);
             orders.setPaymentStatus(PaymentStatus.CANCELLED);
-            orders.setOrderedTime(LocalDateTime.now());
             orders.setRemark("订单已超时，自动取消");
             final boolean updated = orderService.updateById(orders);
             if(!updated){

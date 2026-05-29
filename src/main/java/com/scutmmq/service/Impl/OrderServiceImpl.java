@@ -3,6 +3,7 @@ package com.scutmmq.service.Impl;
 import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.lang.UUID;
 import cn.hutool.core.util.RandomUtil;
+import cn.hutool.crypto.SecureUtil;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.scutmmq.anno.LogAnnotation;
 import com.scutmmq.dto.*;
@@ -33,6 +34,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
@@ -92,6 +94,18 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
         // 3.1 校验订单是否为空
         if(orderItemsDTOS==null||orderItemsDTOS.isEmpty()){
             return Result.error("订单不能为空!");
+        }
+
+        // 3.1.1 下单幂等：基于「用户+收货地址+商品清单」指纹，短窗口去重，拦截连点/重复提交
+        StringBuilder fingerprint = new StringBuilder();
+        fingerprint.append(userId).append(':').append(ordersDTO.getShippingAddressId());
+        orderItemsDTOS.stream()
+                .sorted(Comparator.comparing(OrderItemsDTO::getProductId))
+                .forEach(it -> fingerprint.append('|').append(it.getProductId()).append('x').append(it.getQuantity()));
+        String dedupKey = ORDER_SUBMIT_DEDUP + SecureUtil.md5(fingerprint.toString());
+        Boolean acquired = redisTemplate.opsForValue().setIfAbsent(dedupKey, "1", 5, TimeUnit.SECONDS);
+        if(!Boolean.TRUE.equals(acquired)){
+            return Result.error("请勿重复提交，请稍后再试");
         }
 
         // 3.2 校验收获地址是否存在
@@ -248,10 +262,17 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
     @LogAnnotation(type = OperationType.UPDATE,description = "确认收货")
     public Result confirmOrder(Long orderId) {
         final Orders order = getById(orderId);
+        if(order==null){
+            return Result.error("订单不存在");
+        }
+        // 归属校验：只能确认本人的订单
+        Long currentUserId = UserHolder.getUser().getId();
+        if(!Objects.equals(order.getUserId(), currentUserId)){
+            throw new BusinessException("无权操作该订单");
+        }
         if(order.getStatus()==OrderStatus.SHIPPED){
             order.setStatus(OrderStatus.DELIVERED);
             order.setDeliveredTime(LocalDateTime.now());
-            order.setOrderedTime(LocalDateTime.now());
 
             // 更新商家销量
             final Merchant merchant = merchantMapper.selectById(order.getMerchantId());
@@ -272,6 +293,17 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
     @LogAnnotation(type = OperationType.UPDATE,description = "发货")
     public Result ship(ShipDTO shipDTO) {
 
+        // 归属校验：只能给本人商家的订单发货
+        Long userId = UserHolder.getUser().getId();
+        Long myMerchantId = merchantUserMapper.getMerchantIdByUserId(userId);
+        if(myMerchantId == null){
+            return Result.error("您未注册商户，无权发货");
+        }
+        final Orders target = getById(shipDTO.getOrderId());
+        if(target == null || !Objects.equals(target.getMerchantId(), myMerchantId)){
+            throw new BusinessException("无权操作该订单");
+        }
+
         // 生成物流流水号
         String tracking_number = shipDTO.getShipType().getPrefix() + RandomUtil.randomNumbers(12);
         log.info("订单{}发{}快递，流水号为:{}",shipDTO.getOrderId(),shipDTO.getShipType(),tracking_number);
@@ -282,9 +314,9 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
                 .set(Orders::getTrackingNumber, tracking_number)
                 .set(Orders::getBillingAddressId, shipDTO.getAddressId())
                 .set(Orders::getShippedTime,LocalDateTime.now())
-                .set(Orders::getOrderedTime,LocalDateTime.now())
                 .eq(Orders::getId, shipDTO.getOrderId())
                 .eq(Orders::getStatus, OrderStatus.PAID)
+                .eq(Orders::getMerchantId, myMerchantId)
                 .update();
         if(!updated){
             return Result.error("发货失败，请联系管理员!");
@@ -327,7 +359,6 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
         if(orders.getStatus()==OrderStatus.PENDING){
             orders.setStatus(OrderStatus.CANCELLED);
             orders.setPaymentStatus(PaymentStatus.CANCELLED);
-            orders.setOrderedTime(LocalDateTime.now());
 
             final boolean updated = updateById(orders);
             if(!updated){

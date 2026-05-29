@@ -51,7 +51,7 @@ public class MerchantController {
 
     @PostMapping("/inventory")
     public Result modifyInventory(@RequestBody InventoryDTO inventoryDTO){
-        return productService.modifyStockQuantity(inventoryDTO);
+        return productService.adjustStockByMerchant(inventoryDTO);
     }
 
 }

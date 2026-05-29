@@ -41,7 +41,7 @@ public class UserController {
      */
     @PostMapping("/login")
     public Result login(@RequestBody LoginDTO loginDTO){
-        System.out.println(loginDTO);
+        log.info("用户登录: {}", loginDTO.getLogin());
         return userService.login(loginDTO);
     }
 

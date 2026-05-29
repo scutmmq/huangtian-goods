@@ -42,7 +42,6 @@ public class UserServiceImpl extends ServiceImpl<UserMapper,User> implements Use
     public Result login(LoginDTO loginDTO) {
         // 查询数据库
         LoginType loginType = loginDTO.getLoginType();
-        System.out.println(loginType);
         LambdaQueryChainWrapper<User> wrapper = lambdaQuery();
         wrapper.select(User::getId,User::getNickName,User::getImage,User::getUsername);
         // 0用户名登录 1邮箱登录 2电话号码登录

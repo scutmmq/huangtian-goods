@@ -18,4 +18,10 @@ for i=2,#hashEntries,2 do
 end
 
 -- 更新库存
-redis.call('set',stockKey,currentQuantity-total)
+local available = currentQuantity - total
+if available < 0 then
+    -- 预占总数超过实际库存，说明存在过期残留的预占记录，清除并重置
+    redis.call('del', stockReserveKey)
+    available = currentQuantity
+end
+redis.call('set', stockKey, available)
