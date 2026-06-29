@@ -67,6 +67,18 @@ public class AiActionDraftService {
         return draft;
     }
 
+    /**
+     * 按 assistant_message_id 取草稿。
+     * 给 listMessagesAsVO 用：拿到 assistant 消息后，回查它挂的草稿（如果有）。
+     * 没数据时返回 null。
+     */
+    public AiActionDraft findByAssistantMessageId(Long assistantMessageId) {
+        if (assistantMessageId == null) {
+            return null;
+        }
+        return aiActionDraftMapper.selectByAssistantMessageId(assistantMessageId);
+    }
+
     public void markConfirmed(AiActionDraft draft, Object resultPayload) {
         draft.setStatus(STATUS_CONFIRMED);
         draft.setResultJson(writeJson(resultPayload));

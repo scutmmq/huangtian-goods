@@ -3,8 +3,11 @@ package com.scutmmq.ai.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scutmmq.ai.config.AiAssistantProperties;
+import com.scutmmq.ai.dto.AiActionDraftVO;
 import com.scutmmq.ai.dto.AiChatRequest;
 import com.scutmmq.ai.dto.AiChatSubmitResponse;
+import com.scutmmq.ai.dto.AiMessageVO;
+import com.scutmmq.ai.dto.AiSessionVO;
 import com.scutmmq.ai.entity.AiActionDraft;
 import com.scutmmq.ai.entity.AiMessage;
 import com.scutmmq.ai.entity.AiRun;
@@ -321,6 +324,145 @@ public class AiAssistantService {
             throw new IllegalArgumentException("会话不存在或无权访问");
         }
         return aiMessageService.listBySession(sessionId);
+    }
+
+    /**
+     * 列表视图：会话列表，每条带运行态 + activeRunId。
+     *
+     * 运行态派生规则（见 AiRunService.RUN_STATE_*）：
+     * - 没 Run               -> IDLE
+     * - 最近 Run = QUEUED    -> QUEUED
+     * - 最近 Run = RUNNING   -> RUNNING
+     * - 最近 Run = FAILED    -> FAILED
+     * - 最近 Run = COMPLETED -> IDLE
+     * - 最近 Run = CANCELLED -> IDLE（CANCELLED 也算"没在跑了"）
+     *
+     * activeRunId：runState != IDLE 时填最近 Run 的 id，否则 null。
+     * 性能说明：典型 N+1（1 查 sessions + N 查最新 Run）。单用户会话数一般不多，先这样。
+     */
+    public List<AiSessionVO> listSessionsAsVO() {
+        List<AiSession> sessions = aiSessionService.listByUser(requireCurrentUser().getId());
+        List<AiSessionVO> out = new ArrayList<>(sessions.size());
+        for (AiSession s : sessions) {
+            AiRun latest = aiRunService.findLatestBySessionId(s.getId());
+            String state = AiRunService.RUN_STATE_IDLE;
+            String activeRunId = null;
+            if (latest != null) {
+                String runStatus = latest.getStatus();
+                if (AiRunService.STATUS_QUEUED.equals(runStatus)) {
+                    state = AiRunService.RUN_STATE_QUEUED;
+                    activeRunId = latest.getId();
+                } else if (AiRunService.STATUS_RUNNING.equals(runStatus)) {
+                    state = AiRunService.RUN_STATE_RUNNING;
+                    activeRunId = latest.getId();
+                } else if (AiRunService.STATUS_FAILED.equals(runStatus)) {
+                    state = AiRunService.RUN_STATE_FAILED;
+                    activeRunId = latest.getId();
+                } else {
+                    // COMPLETED / CANCELLED -> IDLE
+                    state = AiRunService.RUN_STATE_IDLE;
+                }
+            }
+            out.add(new AiSessionVO(
+                    s.getId(),
+                    s.getTitle(),
+                    s.getMessageCount(),
+                    state,
+                    activeRunId,
+                    s.getCreatedAt(),
+                    s.getUpdatedAt()));
+        }
+        log.info("[AI][SVC] listSessionsAsVO count={} withActive={}",
+                out.size(),
+                out.stream().filter(v -> v.getActiveRunId() != null).count());
+        return out;
+    }
+
+    /**
+     * 消息列表视图：每条 assistant 消息带 runId / userMessageId / 派生 status / draft。
+     *
+     * 派生 status 规则：
+     * - role != assistant        -> 直接用 message.status（user / tool 一般为 null）
+     * - assistant + 有 runId     -> 查 Run；若 Run 仍处于 QUEUED/RUNNING，则把 message 的 status 改成
+     *                               "STREAMING"（即使 listener 已经把它写成 COMPLETED，前端还是该跟着 Run 走）
+     * - assistant + Run 终态     -> 用 message 自己的 status
+     * - assistant + runId 为空   -> 用 message 自己的 status
+     *
+     * 这样后端 "Run 已 COMPLETED + message 已 COMPLETED" 时不会出现"显示 STREAMING"的鬼影；
+     * "Run 还在跑"时，前端拿到的 status 永远跟 Run 同步。
+     */
+    public List<AiMessageVO> listMessagesAsVO(String sessionId) {
+        UserDTO currentUser = requireCurrentUser();
+        AiSession session = aiSessionService.findByIdForUser(sessionId, currentUser.getId());
+        if (session == null) {
+            throw new IllegalArgumentException("会话不存在或无权访问");
+        }
+        List<AiMessage> messages = aiMessageService.listBySession(sessionId);
+        List<AiMessageVO> out = new ArrayList<>(messages.size());
+        for (AiMessage m : messages) {
+            out.add(toMessageVO(m));
+        }
+        return out;
+    }
+
+    private AiMessageVO toMessageVO(AiMessage m) {
+        String role = m.getRole();
+        String status = m.getStatus();
+        String runId = m.getRunId();
+        Long userMessageId = null;
+        AiActionDraftVO draftVO = null;
+
+        if ("assistant".equals(role) && runId != null) {
+            AiRun run = aiRunService.findById(runId);
+            if (run != null) {
+                String runStatus = run.getStatus();
+                if (AiRunService.STATUS_QUEUED.equals(runStatus)
+                        || AiRunService.STATUS_RUNNING.equals(runStatus)) {
+                    // Run 还在跑，前端看到的就是 STREAMING
+                    status = AiMessageService.MSG_STATUS_STREAMING;
+                }
+                // 其它状态（COMPLETED / FAILED / CANCELLED）以 message.status 为准
+                // userMessageId 在 ai_message 实体上没存，但 ai_run 上有。
+                userMessageId = run.getUserMessageId();
+            }
+            AiActionDraft draft = aiActionDraftService.findByAssistantMessageId(m.getId());
+            if (draft != null) {
+                draftVO = toDraftVO(draft);
+            }
+        }
+
+        return new AiMessageVO(
+                m.getId(),
+                m.getSessionId(),
+                role,
+                m.getContent(),
+                status,
+                runId,
+                userMessageId,
+                draftVO,
+                m.getCreatedAt(),
+                m.getUpdatedAt());
+    }
+
+    private AiActionDraftVO toDraftVO(AiActionDraft d) {
+        JsonNode payload = null;
+        if (d.getPayloadJson() != null) {
+            try {
+                payload = objectMapper.readTree(d.getPayloadJson());
+            } catch (Exception e) {
+                log.warn("[AI][SVC] draft payload unparseable, skip. id={} err={}", d.getId(), e.getMessage());
+            }
+        }
+        return new AiActionDraftVO(
+                d.getId(),
+                d.getActionType(),
+                d.getTitle(),
+                d.getSummary(),
+                payload,
+                d.getStatus(),
+                d.getExpiresAt(),
+                d.getCreatedAt(),
+                d.getUpdatedAt());
     }
 
     public Result confirmDraft(String draftId) {

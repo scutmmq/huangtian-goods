@@ -2,6 +2,8 @@ package com.scutmmq.ai.controller;
 
 import com.scutmmq.ai.dto.AiChatRequest;
 import com.scutmmq.ai.dto.AiChatSubmitResponse;
+import com.scutmmq.ai.dto.AiMessageVO;
+import com.scutmmq.ai.dto.AiSessionVO;
 import com.scutmmq.ai.entity.AiSession;
 import com.scutmmq.ai.entity.AiStreamEvent;
 import com.scutmmq.ai.service.AiAssistantService;
@@ -54,13 +56,13 @@ public class AiAssistantController {
     @GetMapping("/sessions")
     public Result listSessions() {
         log.info("[AI][CTRL] GET /ai/sessions");
-        return Result.success(aiAssistantService.listSessions());
+        return Result.success(aiAssistantService.listSessionsAsVO());
     }
 
     @GetMapping("/sessions/{sessionId}/messages")
     public Result listMessages(@PathVariable String sessionId) {
         log.info("[AI][CTRL] GET /ai/sessions/{}/messages", sessionId);
-        return Result.success(aiAssistantService.listMessages(sessionId));
+        return Result.success(aiAssistantService.listMessagesAsVO(sessionId));
     }
 
     /**

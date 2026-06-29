@@ -32,6 +32,19 @@ public class AiRunService {
     public static final String STATUS_FAILED = "FAILED";
     public static final String STATUS_CANCELLED = "CANCELLED";
 
+    /**
+     * 会话视图层用的运行态常量。
+     * 跟 STATUS_* 的差别：
+     * - 没有 CANCELLED：CANCELLED 在会话维度也算 IDLE（没在跑了）；
+     * - COMPLETED 也映射到 IDLE。
+     * 即给前端的值集合是 {IDLE, QUEUED, RUNNING, FAILED}。
+     */
+    public static final String RUN_STATE_IDLE = "IDLE";
+    public static final String RUN_STATE_QUEUED = "QUEUED";
+    public static final String RUN_STATE_RUNNING = "RUNNING";
+    public static final String RUN_STATE_FAILED = "FAILED";
+    public static final String RUN_STATE_COMPLETED = "COMPLETED";
+
     private final AiRunMapper aiRunMapper;
 
     /**
@@ -119,5 +132,16 @@ public class AiRunService {
             return null;
         }
         return aiRunMapper.selectById(runId);
+    }
+
+    /**
+     * 取某会话最近一条 Run（按 created_at desc，id desc 兜底）。
+     * 用来算会话列表的 runState。没数据时返回 null。
+     */
+    public AiRun findLatestBySessionId(String sessionId) {
+        if (sessionId == null) {
+            return null;
+        }
+        return aiRunMapper.selectLatestBySessionId(sessionId);
     }
 }
