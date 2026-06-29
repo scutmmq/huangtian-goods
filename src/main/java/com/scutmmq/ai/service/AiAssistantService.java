@@ -36,6 +36,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * AI 助手聊天编排服务。负责：
@@ -132,6 +133,7 @@ public class AiAssistantService {
         // 1. 落库用户消息
         AiMessage userMessageRow = aiMessageService.append(session.getId(), "user", userMessage, null);
         Long userMessageId = userMessageRow.getId();
+        Objects.requireNonNull(userMessageId, "user message id is null after persist");
         log.info("[AI][SVC] persisted user message session={} id={} preview=\"{}\"",
                 session.getId(), userMessageId, preview(userMessage, 120));
 
@@ -139,6 +141,7 @@ public class AiAssistantService {
         AiMessage placeholder = aiMessageService.append(
                 session.getId(), "assistant", "", MSG_STATUS_STREAMING, null);
         Long assistantMessageId = placeholder.getId();
+        Objects.requireNonNull(assistantMessageId, "assistant message id is null after persist");
         log.info("[AI][SVC] persisted placeholder assistant message id={} status=STREAMING",
                 assistantMessageId);
 
@@ -230,7 +233,7 @@ public class AiAssistantService {
 
                     aiRunService.complete(runId);
                     log.info("[AI][RUN] worker COMPLETED runId={}", runId);
-                } catch (Throwable e) {
+                } catch (Exception e) {
                     log.error("[AI][RUN] worker FAILED runId={}: {}", runId, e.getMessage(), e);
                     markAssistantMessageFailed(e.getMessage());
                     aiRunService.fail(runId, e.getMessage());
@@ -298,8 +301,7 @@ public class AiAssistantService {
                 AiMessage assistant = new AiMessage();
                 assistant.setId(assistantMessageId);
                 assistant.setStatus(MSG_STATUS_FAILED);
-                String prev = assistant.getContent() == null ? "" : assistant.getContent();
-                assistant.setContent(prev + (prev.isEmpty() ? "" : "\n\n") + "[生成失败] " + safeTruncate(reason, 500));
+                assistant.setContent("[生成失败] " + safeTruncate(reason, 500));
                 assistant.setUpdatedAt(LocalDateTime.now());
                 aiMessageService.update(assistant);
             } catch (Exception e) {
