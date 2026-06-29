@@ -1,6 +1,7 @@
 package com.scutmmq.ai.controller;
 
 import com.scutmmq.ai.dto.AiChatRequest;
+import com.scutmmq.ai.dto.AiChatSubmitResponse;
 import com.scutmmq.ai.service.AiAssistantService;
 import com.scutmmq.entity.Result;
 import lombok.RequiredArgsConstructor;
@@ -23,8 +24,10 @@ public class AiAssistantController {
                 preview(request.getMessage(), 80));
         long t0 = System.currentTimeMillis();
         try {
-            Object data = aiAssistantService.chat(request);
-            log.info("[AI][CTRL] POST /ai/chat OK in {}ms", System.currentTimeMillis() - t0);
+            AiChatSubmitResponse data = aiAssistantService.chat(request);
+            log.info("[AI][CTRL] POST /ai/chat SUBMITTED runId={} sessionId={} status={} in {}ms",
+                    data.getRunId(), data.getSessionId(), data.getStatus(),
+                    System.currentTimeMillis() - t0);
             return Result.success(data);
         } catch (Exception e) {
             log.error("[AI][CTRL] POST /ai/chat FAIL in {}ms: {}",

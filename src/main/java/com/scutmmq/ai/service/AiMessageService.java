@@ -15,15 +15,41 @@ public class AiMessageService {
 
     private final AiMessageMapper aiMessageMapper;
 
+    /**
+     * 兼容旧调用方：status 默认为 null。
+     */
     public AiMessage append(String sessionId, String role, String content, String metadataJson) {
+        return append(sessionId, role, content, null, metadataJson);
+    }
+
+    /**
+     * 显式指定 status 的版本。流式输出场景下，
+     * 助手消息会先以 STREAMING 落库占位，最终再 update 为 COMPLETED / FAILED。
+     */
+    public AiMessage append(String sessionId, String role, String content, String status, String metadataJson) {
         AiMessage message = new AiMessage();
         message.setSessionId(sessionId);
         message.setRole(role);
         message.setContent(content == null ? "" : content);
+        message.setStatus(status);
         message.setMetadataJson(metadataJson);
         message.setCreatedAt(LocalDateTime.now());
         aiMessageMapper.insert(message);
         return message;
+    }
+
+    /**
+     * 直接 updateById 一条 AiMessage，常用于流式生成结束后的“占位 -> 最终内容”替换。
+     * 调用方负责 setContent / setStatus / setUpdatedAt。
+     */
+    public void update(AiMessage message) {
+        if (message == null || message.getId() == null) {
+            return;
+        }
+        if (message.getUpdatedAt() == null) {
+            message.setUpdatedAt(LocalDateTime.now());
+        }
+        aiMessageMapper.updateById(message);
     }
 
     public List<AiMessage> listBySession(String sessionId) {
