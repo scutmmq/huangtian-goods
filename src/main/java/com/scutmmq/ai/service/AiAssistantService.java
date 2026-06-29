@@ -29,8 +29,6 @@ import com.scutmmq.service.OrderService;
 import com.scutmmq.service.UserService;
 import com.scutmmq.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -66,7 +64,7 @@ public class AiAssistantService {
     private final AiRunService aiRunService;
     private final AiAssistantProperties properties;
     private final ObjectMapper objectMapper;
-    private final ThreadPoolTaskExecutor aiTaskExecutor;
+    private final AiSessionTaskScheduler aiSessionTaskScheduler;
 
     private final OrderService orderService;
     private final CartService cartService;
@@ -80,7 +78,7 @@ public class AiAssistantService {
                               AiRunService aiRunService,
                               AiAssistantProperties properties,
                               ObjectMapper objectMapper,
-                              @Qualifier("aiTaskExecutor") ThreadPoolTaskExecutor aiTaskExecutor,
+                              AiSessionTaskScheduler aiSessionTaskScheduler,
                               OrderService orderService,
                               CartService cartService,
                               MerchantService merchantService,
@@ -92,7 +90,7 @@ public class AiAssistantService {
         this.aiRunService = aiRunService;
         this.properties = properties;
         this.objectMapper = objectMapper;
-        this.aiTaskExecutor = aiTaskExecutor;
+        this.aiSessionTaskScheduler = aiSessionTaskScheduler;
         this.orderService = orderService;
         this.cartService = cartService;
         this.merchantService = merchantService;
@@ -101,9 +99,11 @@ public class AiAssistantService {
 
     /**
      * 异步提交：立刻落库 user 消息 + 一个 STREAMING 占位 assistant 消息 + 一条 QUEUED 的 Run，
-     * 然后把真正的生成任务扔到 aiTaskExecutor 线程池里。
-     * 失败兜底：如果线程池拒绝（CallerRunsPolicy 下一般不会），在调用线程里同步跑一遍，
-     * 避免用户消息已经写库却没有 worker 的尴尬情况。
+     * 然后把真正的生成任务扔到 {@link AiSessionTaskScheduler}。
+     * <p>
+     * Task 4 之后，调度器负责"同会话串行 / 跨会话并行"，底层仍是 aiTaskExecutor。
+     * 拒绝策略由底层 CallerRunsPolicy 兜底——队列打满时回退到调用线程，
+     * 等于把响应变慢但不会丢任务。
      */
     public AiChatSubmitResponse chat(AiChatRequest request) {
         UserDTO currentUser = requireCurrentUser();
@@ -150,17 +150,11 @@ public class AiAssistantService {
         String runId = run.getId();
 
         // 4. 提交到后台线程池跑真正的生成
+        //    AiSessionTaskScheduler 负责"同会话串行 / 跨会话并行"，
+        //    底层 aiTaskExecutor 的 CallerRunsPolicy 仍负责队列打满时的回退反压。
         AiRunRunnable task = new AiRunRunnable(
                 currentUser, session.getId(), runId, userMessage, userMessageId, assistantMessageId);
-        try {
-            aiTaskExecutor.execute(task);
-        } catch (Exception e) {
-            // CallerRunsPolicy 下基本不会到这里；保险起见同步兜底，
-            // 至少保证用户能看到一个最终回复而不是卡死。
-            log.error("[AI][SVC] executor rejected task runId={}, fallback to caller thread: {}",
-                    runId, e.getMessage(), e);
-            task.run();
-        }
+        aiSessionTaskScheduler.submitForSession(session.getId(), task);
 
         log.info("[AI][SVC] chat() submitted runId={} sessionId={} status=QUEUED",
                 runId, session.getId());
