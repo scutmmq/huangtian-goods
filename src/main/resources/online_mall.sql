@@ -439,7 +439,6 @@ CREATE TABLE `ai_stream_event` (
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_run_id` (`run_id`),
-  KEY `idx_session_id` (`session_id`),
   KEY `idx_session_id_id` (`session_id`, `id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
