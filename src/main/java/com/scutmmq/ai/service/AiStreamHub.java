@@ -10,7 +10,6 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
 import java.time.Duration;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -56,16 +55,6 @@ public class AiStreamHub {
 
         log.info("[AI][SSE] registered sessionId={} totalForSession={} totalSessions={}",
                 sessionId, list.size(), emitters.size());
-
-        // 立刻发一个 hello 帧，让前端能确认连接已通。
-        try {
-            emitter.send(SseEmitter.event()
-                    .name("hello")
-                    .data(Map.of("sessionId", sessionId)));
-        } catch (IOException e) {
-            log.debug("[AI][SSE] hello send failed sessionId={}: {}", sessionId, e.getMessage());
-            cleanup.run();
-        }
         return emitter;
     }
 
