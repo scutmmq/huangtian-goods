@@ -24,4 +24,12 @@ public interface AiStreamEventMapper extends BaseMapper<AiStreamEvent> {
             "LIMIT 1000")
     List<AiStreamEvent> selectAfterId(@Param("sessionId") String sessionId,
                                        @Param("afterId") Long afterId);
+
+    /**
+     * 查询某 session 最新的事件 id（无事件时返回 null）。
+     * 用于 SSE 连接前快照最新 id，避免 replay 与 live broadcast 重复发送同一事件。
+     */
+    @Select("SELECT id FROM ai_stream_event WHERE session_id = #{sessionId} " +
+            "ORDER BY id DESC LIMIT 1")
+    Long selectLatestId(@Param("sessionId") String sessionId);
 }

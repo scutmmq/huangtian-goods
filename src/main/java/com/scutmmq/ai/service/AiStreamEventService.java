@@ -80,6 +80,17 @@ public class AiStreamEventService {
         return aiStreamEventMapper.selectAfterId(sessionId, cursor);
     }
 
+    /**
+     * 查询某 session 最新的事件 id，无事件时返回 null。
+     * 用于 SSE 连接前建立快照边界，避免 replay 与后续 live broadcast 重复发送。
+     */
+    public Long queryLatestId(String sessionId) {
+        if (sessionId == null) {
+            return null;
+        }
+        return aiStreamEventMapper.selectLatestId(sessionId);
+    }
+
     private String writeJson(JsonNode payload) {
         if (payload == null) {
             return null;

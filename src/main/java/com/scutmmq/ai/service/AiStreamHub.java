@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scutmmq.ai.entity.AiStreamEvent;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -88,14 +89,11 @@ public class AiStreamHub {
                     sessionId, event.getId(), event.getType());
             return;
         }
-        String data = serialize(event);
+        SseEmitter.SseEventBuilder builder = buildSseEvent(event);
         int sent = 0;
         for (SseEmitter emitter : list) {
             try {
-                emitter.send(SseEmitter.event()
-                        .name(event.getType())
-                        .id(String.valueOf(event.getId()))
-                        .data(data));
+                emitter.send(builder);
                 sent++;
             } catch (IOException | IllegalStateException e) {
                 log.debug("[AI][SSE] broadcast send failed sessionId={} eventId={}: {}",
@@ -105,6 +103,19 @@ public class AiStreamHub {
         }
         log.info("[AI][SSE] broadcast sessionId={} eventId={} type={} listeners={} sent={}",
                 sessionId, event.getId(), event.getType(), list.size(), sent);
+    }
+
+    /**
+     * 构建统一 SSE 事件（用于 broadcast 与 replay 两条路径，保证线协议一致）：
+     * - id   = 事件自增 id
+     * - name = 事件类型（如 assistant.delta / tool.started ...）
+     * - data = serialize(event) 的 JSON，APPLICATION_JSON media type
+     */
+    public SseEmitter.SseEventBuilder buildSseEvent(AiStreamEvent event) {
+        return SseEmitter.event()
+                .id(String.valueOf(event.getId()))
+                .name(event.getType())
+                .data(serialize(event), MediaType.APPLICATION_JSON);
     }
 
     /** 当前 session 的在线连接数（用于监控/调试）。 */
