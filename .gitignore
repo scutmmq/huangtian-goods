@@ -93,3 +93,6 @@ application-local.properties
 # Environment variables (secrets) — shipped via release tarball, never tracked
 .env
 .env.*
+
+# Runtime artifacts
+redis.pid
