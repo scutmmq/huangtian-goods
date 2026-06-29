@@ -56,7 +56,8 @@ public class AiRunService {
 
     /**
      * 把 Run 标记为 RUNNING。
-     * 若当前不是 QUEUED（可能被并发抢占/重复调用），记 warn 但仍继续流转，方便排查。
+     * 只有处于 QUEUED 状态才能流转到 RUNNING；
+     * 其它状态（RUNNING / COMPLETED / FAILED / CANCELLED）一律不动，避免把终态倒退回 RUNNING 产生不可能的状态。
      */
     public void start(String runId) {
         AiRun run = aiRunMapper.selectById(runId);
@@ -64,9 +65,11 @@ public class AiRunService {
             log.warn("[AI][RUN] start: run not found runId={}", runId);
             return;
         }
-        if (!STATUS_QUEUED.equals(run.getStatus())) {
-            log.warn("[AI][RUN] start: unexpected status runId={} currentStatus={} (will still flip to RUNNING)",
-                    runId, run.getStatus());
+        String current = run.getStatus();
+        if (!STATUS_QUEUED.equals(current)) {
+            log.warn("[AI][RUN] start: ignored, currentStatus={} runId={} (only QUEUED can transition to RUNNING)",
+                    current, runId);
+            return;
         }
         run.setStatus(STATUS_RUNNING);
         run.setUpdatedAt(LocalDateTime.now());
