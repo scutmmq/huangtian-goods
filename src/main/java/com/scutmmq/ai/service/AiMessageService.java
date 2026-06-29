@@ -13,6 +13,14 @@ import java.util.List;
 @RequiredArgsConstructor
 public class AiMessageService {
 
+    /**
+     * ai_message.status 的字符串常量。
+     * 流式场景：先落 STREAMING → 全部 deltas 写完后改为 COMPLETED / FAILED。
+     */
+    public static final String MSG_STATUS_STREAMING = "STREAMING";
+    public static final String MSG_STATUS_COMPLETED = "COMPLETED";
+    public static final String MSG_STATUS_FAILED = "FAILED";
+
     private final AiMessageMapper aiMessageMapper;
 
     /**

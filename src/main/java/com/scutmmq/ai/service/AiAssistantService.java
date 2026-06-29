@@ -50,13 +50,6 @@ import java.util.Objects;
 @Service
 public class AiAssistantService {
 
-    /**
-     * 流式占位助手消息的初始状态，与 ai_message.status 字段约定一致。
-     */
-    private static final String MSG_STATUS_STREAMING = "STREAMING";
-    private static final String MSG_STATUS_COMPLETED = "COMPLETED";
-    private static final String MSG_STATUS_FAILED = "FAILED";
-
     private final AgentOrchestrator agentOrchestrator;
     private final AiSessionService aiSessionService;
     private final AiMessageService aiMessageService;
@@ -65,6 +58,7 @@ public class AiAssistantService {
     private final AiAssistantProperties properties;
     private final ObjectMapper objectMapper;
     private final AiSessionTaskScheduler aiSessionTaskScheduler;
+    private final AiStreamEventService aiStreamEventService;
 
     private final OrderService orderService;
     private final CartService cartService;
@@ -79,6 +73,7 @@ public class AiAssistantService {
                               AiAssistantProperties properties,
                               ObjectMapper objectMapper,
                               AiSessionTaskScheduler aiSessionTaskScheduler,
+                              AiStreamEventService aiStreamEventService,
                               OrderService orderService,
                               CartService cartService,
                               MerchantService merchantService,
@@ -91,6 +86,7 @@ public class AiAssistantService {
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.aiSessionTaskScheduler = aiSessionTaskScheduler;
+        this.aiStreamEventService = aiStreamEventService;
         this.orderService = orderService;
         this.cartService = cartService;
         this.merchantService = merchantService;
@@ -139,7 +135,7 @@ public class AiAssistantService {
 
         // 2. 落库占位 assistant 消息（STREAMING）
         AiMessage placeholder = aiMessageService.append(
-                session.getId(), "assistant", "", MSG_STATUS_STREAMING, null);
+                session.getId(), "assistant", "", AiMessageService.MSG_STATUS_STREAMING, null);
         Long assistantMessageId = placeholder.getId();
         Objects.requireNonNull(assistantMessageId, "assistant message id is null after persist");
         log.info("[AI][SVC] persisted placeholder assistant message id={} status=STREAMING",
@@ -204,15 +200,28 @@ public class AiAssistantService {
             // 把 UserHolder 显式设上：商城 Service 链里很多地方直接 getUser()，
             // 而 RefreshInterceptor 的设置已经在 HTTP 线程结束时清掉了。
             MallUserContextExecutor.runAs(user, () -> {
+                PersistingOrchestratorListener listener = new PersistingOrchestratorListener(
+                        runId, sessionId, user.getId(), userMessageId, assistantMessageId,
+                        aiStreamEventService, aiMessageService, aiRunService, objectMapper);
                 try {
                     aiRunService.start(runId);
 
                     // 历史要在 worker 里读，因为从 submit 到真正执行可能跨了别的请求，
-                    // 这里拿到的就是“开始执行那一刻”的真实历史——已经包含刚写入的 userMessage。
+                    // 这里拿到的就是"开始执行那一刻"的真实历史——已经包含刚写入的 userMessage。
                     List<AgentOrchestrator.HistoryMessage> history = loadHistoryExcluding(userMessageId);
 
                     long t0 = System.currentTimeMillis();
-                    AgentOrchestrator.AgentResult result = agentOrchestrator.run(user, history, userMessage);
+                    AgentOrchestrator.AgentResult result;
+                    try {
+                        result = agentOrchestrator.runStreaming(user, history, userMessage, listener);
+                    } catch (Exception e) {
+                        // runStreaming 自身异常路径里已经回调过 listener.onRunFailed()；
+                        // 这里再保险一次——避免 orchestrator 抛 exception 在 listener 正常路径之外。
+                        if (!listener.isFailed()) {
+                            listener.onRunFailed(e);
+                        }
+                        throw e;
+                    }
                     log.info("[AI][RUN] worker orchestrator done in {}ms runId={} toolExecs={} draft={} replyLen={}",
                             System.currentTimeMillis() - t0,
                             runId,
@@ -220,17 +229,30 @@ public class AiAssistantService {
                             result.draft() == null ? "none" : result.draft().getActionType(),
                             result.reply() == null ? 0 : result.reply().length());
 
+                    // 工具执行记录 + 草稿行也要落库（同步路径原本就在这做的）。
+                    // 助手消息 content/status 已经被 listener 写到对应的状态，不在这里二次覆盖。
                     persistToolExecutions(result);
                     persistDraftIfPresent(result);
-                    finalizeAssistantMessage(result);
                     finalizeSession(result);
 
-                    aiRunService.complete(runId);
-                    log.info("[AI][RUN] worker COMPLETED runId={}", runId);
+                    // listener 已经把 content/status 落到 db 里的对应状态；这里只标 Run 自身。
+                    if (listener.isFailed()) {
+                        aiRunService.fail(runId, listener.getFailureReason());
+                    } else {
+                        aiRunService.complete(runId);
+                    }
+                    log.info("[AI][RUN] worker DONE runId={} status={}",
+                            runId, listener.isFailed() ? "FAILED" : "COMPLETED");
                 } catch (Exception e) {
-                    log.error("[AI][RUN] worker FAILED runId={}: {}", runId, e.getMessage(), e);
-                    markAssistantMessageFailed(e.getMessage());
-                    aiRunService.fail(runId, e.getMessage());
+                    // listener 没机会正常回调 onRunFailed（比如生成之前的早期异常）时兜底。
+                    if (!listener.isFailed()) {
+                        listener.onRunFailed(e);
+                    }
+                    String reason = listener.getFailureReason() != null
+                            ? listener.getFailureReason()
+                            : (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+                    log.error("[AI][RUN] worker FAILED runId={}: {}", runId, reason, e);
+                    aiRunService.fail(runId, reason);
                 }
             });
         }
@@ -279,29 +301,6 @@ public class AiAssistantService {
                     p.getTitle(), p.getSummary(), p.getPayload());
             log.info("[AI][RUN] persisted draft id={} type={} expiresAt={}",
                     draft.getId(), draft.getActionType(), draft.getExpiresAt());
-        }
-
-        private void finalizeAssistantMessage(AgentOrchestrator.AgentResult result) {
-            AiMessage assistant = new AiMessage();
-            assistant.setId(assistantMessageId);
-            assistant.setContent(result.reply() == null ? "" : result.reply());
-            assistant.setStatus(MSG_STATUS_COMPLETED);
-            assistant.setUpdatedAt(LocalDateTime.now());
-            aiMessageService.update(assistant);
-        }
-
-        private void markAssistantMessageFailed(String reason) {
-            try {
-                AiMessage assistant = new AiMessage();
-                assistant.setId(assistantMessageId);
-                assistant.setStatus(MSG_STATUS_FAILED);
-                assistant.setContent("[生成失败] " + safeTruncate(reason, 500));
-                assistant.setUpdatedAt(LocalDateTime.now());
-                aiMessageService.update(assistant);
-            } catch (Exception e) {
-                log.warn("[AI][RUN] failed to mark assistant message FAILED id={}: {}",
-                        assistantMessageId, e.getMessage());
-            }
         }
 
         private void finalizeSession(AgentOrchestrator.AgentResult result) {
