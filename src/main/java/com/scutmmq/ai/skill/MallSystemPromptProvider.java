@@ -3,7 +3,8 @@ package com.scutmmq.ai.skill;
 import com.scutmmq.dto.UserDTO;
 import org.springframework.stereotype.Component;
 
-import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 
 /**
@@ -62,12 +63,16 @@ public class MallSystemPromptProvider {
             """;
 
     /**
-     * 构建系统提示词。会把当前用户基础信息和日期一起注入，便于模型回答。
+     * 构建系统提示词。会把当前用户基础信息和日期时间一起注入，便于模型回答。
+     * <p>
+     * 时间用 {@code Asia/Shanghai} 显式标注，避免依赖 JVM 默认时区。
+     * 模型被问"今天/现在/几点"时直接读这一行，不要凭训练数据推测。
      */
     public String buildSystemPrompt(UserDTO currentUser) {
-        String today = DateTimeFormatter.ISO_LOCAL_DATE.format(LocalDate.now());
+        ZonedDateTime now = ZonedDateTime.now(ZoneId.of("Asia/Shanghai"));
+        String nowText = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").format(now);
         StringBuilder sb = new StringBuilder(BASE_PROMPT);
-        sb.append("\n当前日期: ").append(today).append("\n");
+        sb.append("\n当前日期时间: ").append(nowText).append(" (Asia/Shanghai)\n");
         if (currentUser != null) {
             sb.append("当前用户: ")
                     .append("userId=").append(currentUser.getId())
