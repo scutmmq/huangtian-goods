@@ -9,8 +9,8 @@ import lombok.Data;
 import java.time.LocalDateTime;
 
 @Data
-@TableName("ai_action_draft")
-public class AiActionDraft {
+@TableName("ai_run")
+public class AiRun {
 
     @TableId
     private String id;
@@ -19,32 +19,16 @@ public class AiActionDraft {
 
     private String sessionId;
 
+    private Long userMessageId;
+
     private Long assistantMessageId;
 
     /**
-     * CREATE_ORDER / ADD_CART_ITEM / REGISTER_MERCHANT / UPDATE_USER_PROFILE / UPDATE_MERCHANT
-     */
-    private String actionType;
-
-    private String title;
-
-    private String summary;
-
-    /**
-     * 完整 payload JSON，由后端在确认时再次校验，绝不直接信任前端传回的内容。
-     */
-    private String payloadJson;
-
-    /**
-     * PENDING / CONFIRMED / CANCELLED / EXPIRED / FAILED
+     * QUEUED / RUNNING / COMPLETED / FAILED / CANCELLED
      */
     private String status;
 
-    private String resultJson;
-
     private String errorMessage;
-
-    private LocalDateTime expiresAt;
 
     @TableField(value = "created_at", fill = FieldFill.INSERT)
     private LocalDateTime createdAt;

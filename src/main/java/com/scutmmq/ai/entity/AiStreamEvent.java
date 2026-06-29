@@ -10,36 +10,27 @@ import lombok.Data;
 import java.time.LocalDateTime;
 
 @Data
-@TableName("ai_message")
-public class AiMessage {
+@TableName("ai_stream_event")
+public class AiStreamEvent {
 
     @TableId(type = IdType.AUTO)
     private Long id;
 
-    private String sessionId;
-
     private String runId;
 
-    /**
-     * user / assistant / tool
-     */
-    private String role;
+    private String sessionId;
 
-    private String content;
+    private Long messageId;
 
-    /**
-     * STREAMING / COMPLETED / FAILED
-     */
-    private String status;
+    private Long userId;
 
     /**
-     * 工具调用、草稿等元数据，JSON 文本。
+     * assistant.delta / tool.started / tool.finished / draft.created / run.completed / run.failed
      */
-    private String metadataJson;
+    private String type;
+
+    private String payloadJson;
 
     @TableField(value = "created_at", fill = FieldFill.INSERT)
     private LocalDateTime createdAt;
-
-    @TableField(value = "updated_at", fill = FieldFill.INSERT_UPDATE)
-    private LocalDateTime updatedAt;
 }

@@ -406,3 +406,50 @@ CREATE TABLE `ai_action_draft` (
   PRIMARY KEY (`id`),
   KEY `idx_user_status` (`user_id`, `status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- =============================================================
+-- AI Assistant 模块 - 流式对话改造
+-- =============================================================
+
+DROP TABLE IF EXISTS `ai_run`;
+CREATE TABLE `ai_run` (
+  `id` varchar(36) NOT NULL,
+  `user_id` bigint unsigned NOT NULL,
+  `session_id` varchar(36) NOT NULL,
+  `user_message_id` bigint unsigned DEFAULT NULL,
+  `assistant_message_id` bigint unsigned DEFAULT NULL,
+  `status` varchar(20) NOT NULL,
+  `error_message` text,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_user_id` (`user_id`),
+  KEY `idx_session_id` (`session_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+DROP TABLE IF EXISTS `ai_stream_event`;
+CREATE TABLE `ai_stream_event` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `run_id` varchar(36) NOT NULL,
+  `session_id` varchar(36) NOT NULL,
+  `message_id` bigint unsigned DEFAULT NULL,
+  `user_id` bigint unsigned DEFAULT NULL,
+  `type` varchar(40) NOT NULL,
+  `payload_json` mediumtext,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_run_id` (`run_id`),
+  KEY `idx_session_id` (`session_id`),
+  KEY `idx_session_id_id` (`session_id`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ai_message 表改造
+ALTER TABLE `ai_message`
+  ADD COLUMN `run_id` varchar(36) DEFAULT NULL AFTER `session_id`,
+  ADD COLUMN `status` varchar(20) DEFAULT NULL AFTER `content`,
+  ADD COLUMN `updated_at` datetime DEFAULT NULL AFTER `created_at`,
+  MODIFY COLUMN `content` mediumtext NOT NULL;
+
+-- ai_action_draft 表改造
+ALTER TABLE `ai_action_draft`
+  ADD COLUMN `assistant_message_id` bigint unsigned DEFAULT NULL AFTER `session_id`;
