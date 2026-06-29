@@ -5,9 +5,14 @@ import java.util.List;
 /**
  * 流式 Chat Completions 的回调接口。Provider 每解析完一个 SSE chunk 就会回调对应方法一次。
  *
- * 实现方不应在回调里抛出异常 —— Provider 内部已经捕获并降级为 onError。
- * 流式生命周期：onContentDelta / onReasoningDelta / onToolCallDelta 可能被调用多次，
- * 最后以 onComplete（成功）或 onError（失败）收尾，两者必有其一。
+ * <p><b>线程契约：</b>所有回调都在 {@code AiChatClient.streamChatCompletion} 的调用方线程上
+ * 同步触发 —— Provider 内部用 {@code .blockLast()} 阻塞调用线程，回调依次发生在该线程上，
+ * 直到方法返回。实现方无需做线程切换，但也不应在回调里做长时间阻塞或重入 Provider。
+ *
+ * <p><b>实现方不应在回调里抛出异常</b> —— Provider 内部已经捕获并降级为 onError。
+ *
+ * <p>流式生命周期：onContentDelta / onReasoningDelta / onToolCallDelta 可能被调用多次，
+ * 最后以 onComplete（成功）或 onError（失败）收尾，两者必有其一，且每个终态最多触发一次。
  */
 public interface StreamChunkListener {
 

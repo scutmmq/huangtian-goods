@@ -8,14 +8,18 @@ import com.scutmmq.ai.config.AiProviderConfig;
 import com.scutmmq.ai.tool.AgentToolCall;
 import com.scutmmq.ai.tool.AgentToolDefinition;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * OpenAI-compatible AI 聊天客户端。v1 同步阻塞调用，封装工具协议序列化与响应解析。
@@ -111,6 +115,17 @@ public class AiChatClient {
      * 流式调用 Chat Completions。请求体带 stream: true，按 chunk 回调给 listener。
      * 保留现有 chatCompletion(messages, tools) 同步方法不变（测试/降级路径）。
      *
+     * <p><b>线程契约：</b>listener 的所有回调都在调用方的线程上同步触发（方法内部
+     * 使用 {@code .blockLast()} 阻塞当前线程），整个方法在流正常结束、收到
+     * {@code data: [DONE]}、或遇到致命错误时返回。回调里不要做长时间阻塞或重入本类。
+     *
+     * <p><b>SSE 行分帧：</b>实现上以 {@code DataBuffer} 接收原始字节，按 {@code \n}
+     * 切行，跨缓冲区的半行会被保留到下一个 buffer，确保 {@code data: ...} 行不会因
+     * netty flush 边界被截断或合并。
+     *
+     * <p><b>终态保证：</b>成功流只触发一次 {@code onComplete}；失败流只触发一次
+     * {@code onError}；两者不会同时触发，也不会重复触发。
+     *
      * @param messages 同 chatCompletion
      * @param tools    同 chatCompletion
      * @param listener 接收每个 chunk 的回调；本方法会捕获所有内部异常并转交给 onError，不会抛到外层
@@ -142,6 +157,11 @@ public class AiChatClient {
 
         long t0 = System.currentTimeMillis();
         int[] chunkCount = {0};
+        // 终态去重：保证 onComplete 只触发一次（[DONE] 路径 + Flux 终止路径都会试图触发）。
+        // onError 不去重 —— 任何 fatal 错误都要转交给 listener。
+        AtomicBoolean completed = new AtomicBoolean(false);
+        // SSE 行分帧：跨 DataBuffer 边界累积半行，直到遇到 \n 才视为一条完整行。
+        StringBuilder lineBuffer = new StringBuilder();
         try {
             webClient.post()
                     .uri(aiProviderConfig.getUrl())
@@ -159,9 +179,29 @@ public class AiChatClient {
                                                 "AI Provider error: " + response.statusCode() + " - " + errorBody);
                                     })
                     )
-                    .bodyToFlux(String.class)
+                    .bodyToFlux(DataBuffer.class)
                     .timeout(Duration.ofMinutes(5))
-                    .doOnNext(line -> parseStreamLine(line, listener, chunkCount))
+                    .doOnNext(buffer -> {
+                        try {
+                            String chunk = bufferToString(buffer);
+                            if (chunk.isEmpty()) return;
+                            // 把 chunk 按 \n 切成若干行；最后一段可能是不完整的半行，留在 lineBuffer 里。
+                            int start = 0;
+                            int idx;
+                            while ((idx = chunk.indexOf('\n', start)) >= 0) {
+                                lineBuffer.append(chunk, start, idx);
+                                String line = lineBuffer.toString();
+                                lineBuffer.setLength(0);
+                                parseStreamLine(line, listener, chunkCount, completed);
+                                start = idx + 1;
+                            }
+                            if (start < chunk.length()) {
+                                lineBuffer.append(chunk, start, chunk.length());
+                            }
+                        } finally {
+                            DataBufferUtils.release(buffer);
+                        }
+                    })
                     .doOnError(err -> {
                         long elapsed = System.currentTimeMillis() - t0;
                         log.error("[AI][HTTP][STREAM] stream failed in {}ms after {} chunks: {}",
@@ -170,8 +210,19 @@ public class AiChatClient {
                     })
                     .doOnComplete(() -> {
                         long elapsed = System.currentTimeMillis() - t0;
+                        // 收尾：流正常结束前 flush 残留的半行（多半是尾部没换行的 data: [DONE]）
+                        if (lineBuffer.length() > 0) {
+                            String tail = lineBuffer.toString();
+                            lineBuffer.setLength(0);
+                            parseStreamLine(tail, listener, chunkCount, completed);
+                        }
                         log.info("[AI][HTTP][STREAM] <- stream complete in {}ms chunks={}",
                                 elapsed, chunkCount[0]);
+                        if (completed.compareAndSet(false, true)) {
+                            safeOnComplete(listener);
+                        } else {
+                            log.debug("[AI][HTTP][STREAM] onComplete already fired (via [DONE]), skip doOnComplete path");
+                        }
                     })
                     .blockLast();
         } catch (Exception e) {
@@ -180,6 +231,15 @@ public class AiChatClient {
             log.error("[AI][HTTP][STREAM] outer failure in {}ms: {}", elapsed, e.getMessage(), e);
             safeOnError(listener, e);
         }
+    }
+
+    private static String bufferToString(DataBuffer buffer) {
+        if (buffer == null) return "";
+        int len = buffer.readableByteCount();
+        if (len == 0) return "";
+        byte[] bytes = new byte[len];
+        buffer.read(bytes);
+        return new String(bytes, StandardCharsets.UTF_8);
     }
 
     /**
@@ -202,8 +262,10 @@ public class AiChatClient {
     /**
      * 解析单行 SSE 数据（不包含末尾换行）。
      * 期望格式：`data: {...}` 或 `data: [DONE]`。其余行（event: / : / 空行）跳过。
+     * completed 是终态去重标记 —— [DONE] 路径上先 CAS 再调 onComplete，
+     * 留出 doOnComplete 路径在 Flux 终止时跳过重复触发。
      */
-    void parseStreamLine(String rawLine, StreamChunkListener listener, int[] chunkCount) {
+    void parseStreamLine(String rawLine, StreamChunkListener listener, int[] chunkCount, AtomicBoolean completed) {
         if (rawLine == null) return;
         String line = rawLine.trim();
         if (line.isEmpty()) return;
@@ -220,10 +282,15 @@ public class AiChatClient {
 
         chunkCount[0]++;
 
-        // 流结束标记
+        // 流结束标记 —— 抢先 CAS 占用 completed 标记，
+        // 后续 doOnComplete 走另一个 if 分支就不会重复触发 onComplete。
         if ("[DONE]".equals(data)) {
             log.info("[AI][HTTP][STREAM] received [DONE] after {} chunks", chunkCount[0]);
-            safeOnComplete(listener);
+            if (completed.compareAndSet(false, true)) {
+                safeOnComplete(listener);
+            } else {
+                log.debug("[AI][HTTP][STREAM] onComplete already fired, skip [DONE] path");
+            }
             return;
         }
 
