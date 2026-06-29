@@ -107,6 +107,191 @@ public class AiChatClient {
         return parsed;
     }
 
+    /**
+     * 流式调用 Chat Completions。请求体带 stream: true，按 chunk 回调给 listener。
+     * 保留现有 chatCompletion(messages, tools) 同步方法不变（测试/降级路径）。
+     *
+     * @param messages 同 chatCompletion
+     * @param tools    同 chatCompletion
+     * @param listener 接收每个 chunk 的回调；本方法会捕获所有内部异常并转交给 onError，不会抛到外层
+     */
+    public void streamChatCompletion(List<Map<String, Object>> messages,
+                                     List<AgentToolDefinition> tools,
+                                     StreamChunkListener listener) {
+        aiProviderConfig.validateReady();
+        int toolCount = tools == null ? 0 : tools.size();
+        log.info("[AI][HTTP][STREAM] -> {} model={} messages={} tools={}",
+                aiProviderConfig.getUrl(),
+                aiProviderConfig.getModel(),
+                messages.size(),
+                toolCount);
+
+        for (int i = 0; i < messages.size(); i++) {
+            Map<String, Object> m = messages.get(i);
+            Object role = m.get("role");
+            Object content = m.get("content");
+            String cstr = content == null ? "" : String.valueOf(content);
+            boolean hasToolCalls = m.get("tool_calls") != null;
+            boolean hasReasoning = m.get("reasoning_content") != null;
+            log.info("[AI][HTTP][STREAM]   msg[{}] role={} len={} hasToolCalls={} hasReasoning={} preview=\"{}\"",
+                    i, role, cstr.length(), hasToolCalls, hasReasoning, preview(cstr, 160));
+        }
+
+        String requestBody = buildStreamRequestBody(messages, tools);
+        log.debug("[AI][HTTP][STREAM] requestBody (len={}): {}", requestBody.length(), requestBody);
+
+        long t0 = System.currentTimeMillis();
+        int[] chunkCount = {0};
+        try {
+            webClient.post()
+                    .uri(aiProviderConfig.getUrl())
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .header(aiProviderConfig.getAuthHeader(), aiProviderConfig.authValue())
+                    .bodyValue(requestBody)
+                    .retrieve()
+                    .onStatus(
+                            status -> status.is4xxClientError() || status.is5xxServerError(),
+                            response -> response.bodyToMono(String.class)
+                                    .map(errorBody -> {
+                                        log.error("[AI][HTTP][STREAM] provider error status={} body={}",
+                                                response.statusCode(), errorBody);
+                                        return new RuntimeException(
+                                                "AI Provider error: " + response.statusCode() + " - " + errorBody);
+                                    })
+                    )
+                    .bodyToFlux(String.class)
+                    .timeout(Duration.ofMinutes(5))
+                    .doOnNext(line -> parseStreamLine(line, listener, chunkCount))
+                    .doOnError(err -> {
+                        long elapsed = System.currentTimeMillis() - t0;
+                        log.error("[AI][HTTP][STREAM] stream failed in {}ms after {} chunks: {}",
+                                elapsed, chunkCount[0], err.getMessage());
+                        safeOnError(listener, err);
+                    })
+                    .doOnComplete(() -> {
+                        long elapsed = System.currentTimeMillis() - t0;
+                        log.info("[AI][HTTP][STREAM] <- stream complete in {}ms chunks={}",
+                                elapsed, chunkCount[0]);
+                    })
+                    .blockLast();
+        } catch (Exception e) {
+            // 兜底：极少数情况下 blockLast 之外的异常（Flux 装配错误等）走到这里
+            long elapsed = System.currentTimeMillis() - t0;
+            log.error("[AI][HTTP][STREAM] outer failure in {}ms: {}", elapsed, e.getMessage(), e);
+            safeOnError(listener, e);
+        }
+    }
+
+    /**
+     * 构造带 stream: true 的请求体。基于 buildRequestBody 的逻辑，最后追加 stream 字段。
+     */
+    String buildStreamRequestBody(List<Map<String, Object>> messages, List<AgentToolDefinition> tools) {
+        String base = buildRequestBody(messages, tools);
+        try {
+            JsonNode root = objectMapper.readTree(base);
+            if (root instanceof ObjectNode obj) {
+                obj.put("stream", true);
+                return objectMapper.writeValueAsString(obj);
+            }
+        } catch (Exception e) {
+            log.warn("[AI][HTTP][STREAM] failed to inject stream=true, falling back to base body: {}", e.getMessage());
+        }
+        return base;
+    }
+
+    /**
+     * 解析单行 SSE 数据（不包含末尾换行）。
+     * 期望格式：`data: {...}` 或 `data: [DONE]`。其余行（event: / : / 空行）跳过。
+     */
+    void parseStreamLine(String rawLine, StreamChunkListener listener, int[] chunkCount) {
+        if (rawLine == null) return;
+        String line = rawLine.trim();
+        if (line.isEmpty()) return;
+        // SSE 注释行以 ":" 开头，跳过
+        if (line.startsWith(":")) return;
+        // event: 行不处理（OpenAI 协议里只需要 data）
+        int colonIdx = line.indexOf(':');
+        if (colonIdx <= 0) return;
+        String field = line.substring(0, colonIdx);
+        if (!"data".equals(field)) return;
+
+        String data = line.substring(colonIdx + 1).trim();
+        if (data.isEmpty()) return;
+
+        chunkCount[0]++;
+
+        // 流结束标记
+        if ("[DONE]".equals(data)) {
+            log.info("[AI][HTTP][STREAM] received [DONE] after {} chunks", chunkCount[0]);
+            safeOnComplete(listener);
+            return;
+        }
+
+        try {
+            JsonNode root = objectMapper.readTree(data);
+            JsonNode choices = root.path("choices");
+            if (!choices.isArray() || choices.size() == 0) {
+                return;
+            }
+            JsonNode delta = choices.get(0).path("delta");
+
+            // content delta
+            if (delta.hasNonNull("content")) {
+                String content = delta.get("content").asText("");
+                if (!content.isEmpty()) {
+                    listener.onContentDelta(content);
+                }
+            }
+
+            // reasoning_content delta (DeepSeek thinking)
+            if (delta.hasNonNull("reasoning_content")) {
+                String reasoning = delta.get("reasoning_content").asText("");
+                if (!reasoning.isEmpty()) {
+                    listener.onReasoningDelta(reasoning);
+                }
+            }
+
+            // tool_calls delta
+            JsonNode toolCallsNode = delta.path("tool_calls");
+            if (toolCallsNode.isArray() && toolCallsNode.size() > 0) {
+                List<ToolCallDelta> deltas = new ArrayList<>();
+                for (JsonNode tc : toolCallsNode) {
+                    JsonNode function = tc.path("function");
+                    ToolCallDelta d = new ToolCallDelta();
+                    d.setIndex(tc.path("index").asInt(0));
+                    d.setId(tc.hasNonNull("id") ? tc.get("id").asText("") : "");
+                    d.setName(function.hasNonNull("name") ? function.get("name").asText("") : "");
+                    d.setArgumentsDelta(function.hasNonNull("arguments") ? function.get("arguments").asText("") : "");
+                    deltas.add(d);
+                }
+                if (!deltas.isEmpty()) {
+                    listener.onToolCallDelta(deltas);
+                }
+            }
+        } catch (Exception parseErr) {
+            // 单行 JSON 解析失败只记 warn，不打断整条流
+            log.warn("[AI][HTTP][STREAM] failed to parse chunk #{} (len={}): {} payload={}",
+                    chunkCount[0], data.length(), parseErr.getMessage(),
+                    preview(data, 200));
+        }
+    }
+
+    private void safeOnComplete(StreamChunkListener listener) {
+        try {
+            listener.onComplete();
+        } catch (Exception e) {
+            log.warn("[AI][HTTP][STREAM] listener.onComplete threw: {}", e.getMessage(), e);
+        }
+    }
+
+    private void safeOnError(StreamChunkListener listener, Throwable err) {
+        try {
+            listener.onError(err);
+        } catch (Exception e) {
+            log.warn("[AI][HTTP][STREAM] listener.onError threw: {}", e.getMessage(), e);
+        }
+    }
+
     private static String preview(String s, int max) {
         if (s == null) return "";
         String t = s.replace("\n", " ").replace("\r", " ");
