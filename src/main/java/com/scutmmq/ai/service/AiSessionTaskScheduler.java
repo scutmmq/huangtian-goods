@@ -85,16 +85,22 @@ public class AiSessionTaskScheduler {
                 }
             }
         } finally {
-            // Re-check race: another submitForSession may have added a task between our last poll and clearing the flag
+            // Re-check race: another submitForSession may have added a task between our last poll and clearing the flag.
+            // Two-step CAS: release then immediately re-acquire. If re-acquire fails, another submitter took the flag
+            // and will run the queued tasks — we must not dispatch a second runner or serialized-per-session is violated.
             Queue<Runnable> queue = sessionQueues.get(sessionId);
             if (queue != null && !queue.isEmpty()) {
                 if (active.compareAndSet(true, false)) {
-                    // Re-acquired → continue running
-                    aiTaskExecutor.execute(() -> runSessionQueue(sessionId, active));
+                    if (active.compareAndSet(false, true)) {
+                        aiTaskExecutor.execute(() -> runSessionQueue(sessionId, active));
+                        return;
+                    }
+                    // Lost the race: another submitter grabbed the flag and will run the queued tasks.
                     return;
                 }
+            } else {
+                active.set(false);
             }
-            active.set(false);
         }
     }
 }
