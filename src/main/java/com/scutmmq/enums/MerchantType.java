@@ -17,15 +17,49 @@ public enum MerchantType {
     @JsonValue
     private final String desc;
 
-    // 核心：添加反序列化方法，按value字段解析前端传的数字
+    /**
+     * 反序列化：同时兼容
+     *  - 数字编码 1 / 2（前端 el-select 传的值）
+     *  - 数字字符串 "1" / "2"
+     *  - 英文名 INDIVIDUAL / PERSONAL / ENTERPRISE / COMPANY（AI 助手可能传 PERSONAL）
+     *  - 中文描述 个人 / 企业（@JsonValue 序列化后的值，保证可往返）
+     * 用 Object 形参让 Jackson 把原始 JSON 值（数字→Integer，字符串→String）原样传入。
+     */
     @JsonCreator
-    public static MerchantType fromValue(Integer value) {
+    public static MerchantType fromValue(Object raw) {
+        if (raw == null) {
+            return null;
+        }
+        if (raw instanceof Number) {
+            return fromCode(((Number) raw).intValue());
+        }
+        String s = raw.toString().trim();
+        if (s.isEmpty()) {
+            return null;
+        }
+        if (s.matches("-?\\d+")) {
+            return fromCode(Integer.parseInt(s));
+        }
+        switch (s.toUpperCase()) {
+            case "INDIVIDUAL":
+            case "PERSONAL":
+            case "个人":
+                return INDIVIDUAL;
+            case "ENTERPRISE":
+            case "COMPANY":
+            case "企业":
+                return ENTERPRISE;
+            default:
+                throw new IllegalArgumentException("无效的商家类型：" + raw);
+        }
+    }
+
+    private static MerchantType fromCode(int code) {
         for (MerchantType type : MerchantType.values()) {
-            if (type.value.equals(value)) {
+            if (type.value == code) {
                 return type;
             }
         }
-        // 无匹配值时抛异常，也可返回默认值（根据业务调整）
-        throw new IllegalArgumentException("无效的商家类型：" + value);
+        throw new IllegalArgumentException("无效的商家类型：" + code);
     }
 }
