@@ -89,3 +89,7 @@ application-local.properties
 *.swp
 *.swo
 *~
+
+# Environment variables (secrets) — shipped via release tarball, never tracked
+.env
+.env.*
