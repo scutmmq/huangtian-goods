@@ -148,6 +148,16 @@ public class AiAssistantService {
         AiRun run = aiRunService.submit(userId, session.getId(), userMessageId, assistantMessageId);
         String runId = run.getId();
 
+        // 3.5 把 runId 写回占位 assistant 消息的 runId 列。
+        //    之前只落库了 id/status/content，runId 一直是 null，
+        //    导致 listMessagesAsVO 里的 runId 分支进不去 —— STREAMING 派生 / userMessageId 都拿不到。
+        AiMessage placeholderWithRun = new AiMessage();
+        placeholderWithRun.setId(assistantMessageId);
+        placeholderWithRun.setRunId(runId);
+        placeholderWithRun.setUpdatedAt(LocalDateTime.now());
+        aiMessageService.update(placeholderWithRun);
+        log.info("[AI][SVC] backfilled runId={} on assistant message id={}", runId, assistantMessageId);
+
         // 4. 提交到后台线程池跑真正的生成
         //    AiSessionTaskScheduler 负责"同会话串行 / 跨会话并行"，
         //    底层 aiTaskExecutor 的 CallerRunsPolicy 仍负责队列打满时的回退反压。
@@ -412,22 +422,32 @@ public class AiAssistantService {
         Long userMessageId = null;
         AiActionDraftVO draftVO = null;
 
-        if ("assistant".equals(role) && runId != null) {
-            AiRun run = aiRunService.findById(runId);
-            if (run != null) {
-                String runStatus = run.getStatus();
-                if (AiRunService.STATUS_QUEUED.equals(runStatus)
-                        || AiRunService.STATUS_RUNNING.equals(runStatus)) {
-                    // Run 还在跑，前端看到的就是 STREAMING
-                    status = AiMessageService.MSG_STATUS_STREAMING;
-                }
-                // 其它状态（COMPLETED / FAILED / CANCELLED）以 message.status 为准
-                // userMessageId 在 ai_message 实体上没存，但 ai_run 上有。
-                userMessageId = run.getUserMessageId();
-            }
+        if ("assistant".equals(role)) {
+            // 草稿查找：只要是 assistant 消息就无条件查。
+            // 之前错误地把它和 runId != null 绑在一起，导致 runId 缺失时草稿永远查不到。
+            // 草稿的关联键是 assistant_message_id（= m.getId()），跟 runId 无关。
             AiActionDraft draft = aiActionDraftService.findByAssistantMessageId(m.getId());
             if (draft != null) {
                 draftVO = toDraftVO(draft);
+            }
+
+            // Run-based status / userMessageId 派生：仅在 runId 已写入时才有意义。
+            // 旧代码把这一段和上面的草稿查找绑在一起，导致 runId 没落库时整个 if 块全跳过。
+            if (runId != null) {
+                AiRun run = aiRunService.findById(runId);
+                if (run != null) {
+                    String runStatus = run.getStatus();
+                    if (AiRunService.STATUS_QUEUED.equals(runStatus)
+                            || AiRunService.STATUS_RUNNING.equals(runStatus)) {
+                        // Run 还在跑，前端看到的就是 STREAMING
+                        status = AiMessageService.MSG_STATUS_STREAMING;
+                    }
+                    // 其它状态（COMPLETED / FAILED / CANCELLED）以 message.status 为准
+                    // userMessageId 在 ai_message 实体上没存，但 ai_run 上有。
+                    if (run.getUserMessageId() != null) {
+                        userMessageId = run.getUserMessageId();
+                    }
+                }
             }
         }
 
