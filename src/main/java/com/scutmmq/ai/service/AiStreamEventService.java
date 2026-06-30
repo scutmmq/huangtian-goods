@@ -8,6 +8,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -51,6 +52,9 @@ public class AiStreamEventService {
         event.setUserId(userId);
         event.setType(type);
         event.setPayloadJson(writeJson(payload));
+        // 显式设 createdAt。项目没有 MetaObjectHandler，FieldFill.INSERT 注解不会自动生效，
+        // 必须手动填，否则 NOT NULL 约束会失败（之前所有 stream event 都没写进 DB）。
+        event.setCreatedAt(LocalDateTime.now());
 
         // 先落库。MyBatis-Plus insert 会回填自增 id。
         aiStreamEventMapper.insert(event);
