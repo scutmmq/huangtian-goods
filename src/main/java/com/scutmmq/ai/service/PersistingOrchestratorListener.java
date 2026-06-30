@@ -159,10 +159,12 @@ public class PersistingOrchestratorListener implements OrchestratorListener {
         msg.setUpdatedAt(LocalDateTime.now());
         updateMessage(msg);
 
-        ObjectNode payload = objectMapper.createObjectNode();
-        payload.put("replyLength", finalContent == null ? 0 : finalContent.length());
-        payload.put("hasDraft", draft != null);
-        appendEvent(AiStreamEventService.TYPE_RUN_COMPLETED, payload);
+        // 注意：这里不 emit run.completed SSE 事件！
+        // race condition：此时 ai_run.status 还是 RUNNING，runStreaming 还没返回。
+        // 若前端收到事件 → loadSessions() → 看到 RUNNING → "生成中" badge 卡住。
+        // 真正的 run.completed 事件由 AiAssistantService.Runnable 在
+        // aiRunService.complete() 之后 emit（此时 ai_run.status=COMPLETED）。
+        // 这里只做 DB 写入（assistant message 更新）。
     }
 
     @Override

@@ -249,13 +249,35 @@ public class AiAssistantService {
                     finalizeSession(result);
 
                     // listener 已经把 content/status 落到 db 里的对应状态；这里只标 Run 自身。
+                    final String terminalStatus;
                     if (listener.isFailed()) {
                         aiRunService.fail(runId, listener.getFailureReason());
+                        terminalStatus = AiRunService.STATUS_FAILED;
                     } else {
                         aiRunService.complete(runId);
+                        terminalStatus = AiRunService.STATUS_COMPLETED;
                     }
                     log.info("[AI][RUN] worker DONE runId={} status={}",
-                            runId, listener.isFailed() ? "FAILED" : "COMPLETED");
+                            runId, terminalStatus);
+
+                    // ── 这里才 emit run.completed / run.failed SSE 事件 ──
+                    // 之前 listener.onRunCompleted 是在 runStreaming 内部 emit，
+                    // 那时 ai_run.status 还是 RUNNING —— race condition：
+                    // 前端 loadSessions() 会看到 RUNNING → "生成中" badge 卡住。
+                    // 在 aiRunService.complete/fail 之后再 emit，
+                    // 前端 loadSessions() 拿到的就是 IDLE / FAILED，正确。
+                    com.fasterxml.jackson.databind.node.ObjectNode terminalPayload = objectMapper.createObjectNode();
+                    terminalPayload.put("replyLength", result.reply() == null ? 0 : result.reply().length());
+                    terminalPayload.put("hasDraft", result.draft() != null);
+                    if (AiRunService.STATUS_FAILED.equals(terminalStatus)) {
+                        terminalPayload.put("error", listener.getFailureReason());
+                    }
+                    aiStreamEventService.append(
+                            runId, sessionId, assistantMessageId, user.getId(),
+                            AiRunService.STATUS_FAILED.equals(terminalStatus)
+                                    ? AiStreamEventService.TYPE_RUN_FAILED
+                                    : AiStreamEventService.TYPE_RUN_COMPLETED,
+                            terminalPayload);
                 } catch (Exception e) {
                     // listener 没机会正常回调 onRunFailed（比如生成之前的早期异常）时兜底。
                     if (!listener.isFailed()) {
