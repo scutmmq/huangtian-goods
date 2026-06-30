@@ -320,6 +320,9 @@ public class AiAssistantService {
 
         private void persistToolExecutions(AgentOrchestrator.AgentResult result) {
             for (AgentOrchestrator.ToolExecutionRecord exec : result.toolExecutions()) {
+                // 跳过空名字的工具执行 —— 可能是 AI 流式 tool_calls 拼接的边缘情况。
+                // 不写库就不显示 "[] 工具不存在:" 这种噪音。
+                if (exec.name() == null || exec.name().isBlank()) continue;
                 aiMessageService.append(sessionId, "tool",
                         "[" + exec.name() + "] " + exec.content(),
                         toJsonSafe(exec.arguments()));
