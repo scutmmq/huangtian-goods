@@ -39,10 +39,25 @@ public class AiActionDraftService {
                                 String title,
                                 String summary,
                                 JsonNode payload) {
+        return create(userId, sessionId, actionType, title, summary, payload, null);
+    }
+
+    /**
+     * 创建草稿并可选地把 assistant_message_id 写回,方便 listMessagesAsVO 回查。
+     * assistantMessageId 可为 null(历史数据/不适用场景,DB 列允许 null)。
+     */
+    public AiActionDraft create(Long userId,
+                                String sessionId,
+                                String actionType,
+                                String title,
+                                String summary,
+                                JsonNode payload,
+                                Long assistantMessageId) {
         AiActionDraft draft = new AiActionDraft();
         draft.setId(UUID.randomUUID().toString());
         draft.setUserId(userId);
         draft.setSessionId(sessionId);
+        draft.setAssistantMessageId(assistantMessageId);
         draft.setActionType(actionType);
         draft.setTitle(title);
         draft.setSummary(summary);

@@ -334,11 +334,14 @@ public class AiAssistantService {
                 return;
             }
             AgentToolResult.DraftPayload p = result.draft();
+            // B0:写入 assistantMessageId,让 listMessagesAsVO 回查草稿时拿得到,
+            //    修复历史对话恢复时确认卡片丢失的问题。
             AiActionDraft draft = aiActionDraftService.create(
                     user.getId(), sessionId, p.getActionType(),
-                    p.getTitle(), p.getSummary(), p.getPayload());
-            log.info("[AI][RUN] persisted draft id={} type={} expiresAt={}",
-                    draft.getId(), draft.getActionType(), draft.getExpiresAt());
+                    p.getTitle(), p.getSummary(), p.getPayload(),
+                    assistantMessageId);
+            log.info("[AI][RUN] persisted draft id={} type={} assistantMessageId={} expiresAt={}",
+                    draft.getId(), draft.getActionType(), assistantMessageId, draft.getExpiresAt());
         }
 
         private void finalizeSession(AgentOrchestrator.AgentResult result) {
