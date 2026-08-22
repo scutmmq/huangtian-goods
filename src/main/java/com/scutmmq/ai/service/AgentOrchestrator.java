@@ -20,6 +20,7 @@ import com.scutmmq.ai.tool.AgentToolDefinition;
 import com.scutmmq.ai.tool.AgentToolResult;
 import com.scutmmq.ai.tool.MallAgentTool;
 import com.scutmmq.ai.tool.UserRole;
+import com.scutmmq.ai.util.DsmlSanitizer;
 import com.scutmmq.ai.util.MallUserContextExecutor;
 import com.scutmmq.dto.UserDTO;
 import lombok.extern.slf4j.Slf4j;
@@ -262,8 +263,19 @@ public class AgentOrchestrator {
                     @Override
                     public void onContentDelta(String delta) {
                         if (delta == null || delta.isEmpty()) return;
-                        replyBuilder.append(delta);
-                        safeOnAssistantDelta(listener, delta, replyBuilder.length() - delta.length());
+                        // C6 修复:在源头(satisfies-onContentDelta)就剔除 DSML,
+                        // 让 replyBuilder、safeOnAssistantDelta listener、
+                        // 后续 finalReply 全部拿干净文本。
+                        // 这覆盖 C2/C4 漏掉的"原始 token 在 orchestrator 内层留存"路径。
+                        String clean = DsmlSanitizer.strip(delta);
+                        if (clean.isEmpty()) {
+                            // 整片 delta 是 DSML 块,不进 replyBuilder 也不广播 SSE 空文本,
+                            // 但仍推进 llm 输出累计长度占位,避免 SSE 客户端 offset 卡顿。
+                            safeOnAssistantDelta(listener, "", replyBuilder.length());
+                            return;
+                        }
+                        replyBuilder.append(clean);
+                        safeOnAssistantDelta(listener, clean, replyBuilder.length() - clean.length());
                         if (ttftMsHolder[0] < 0) {
                             ttftMsHolder[0] = System.currentTimeMillis() - runStartMs;
                         }
@@ -383,8 +395,14 @@ public class AgentOrchestrator {
                         @Override
                         public void onContentDelta(String delta) {
                             if (delta == null || delta.isEmpty()) return;
-                            forcedReply.append(delta);
-                            safeOnAssistantDelta(listener, delta, forcedReply.length() - delta.length());
+                            // C6:强制收尾阶段的输出也走同一 sanitize,避免 fallback reply 漏 DSML
+                            String clean = DsmlSanitizer.strip(delta);
+                            if (clean.isEmpty()) {
+                                safeOnAssistantDelta(listener, "", forcedReply.length());
+                                return;
+                            }
+                            forcedReply.append(clean);
+                            safeOnAssistantDelta(listener, clean, forcedReply.length() - clean.length());
                         }
 
                         @Override
