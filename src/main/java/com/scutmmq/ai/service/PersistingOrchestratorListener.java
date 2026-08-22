@@ -87,18 +87,25 @@ public class PersistingOrchestratorListener implements OrchestratorListener {
         if (delta == null || delta.isEmpty()) {
             return;
         }
+        // C2 hotfix:过滤掉 DSML 工具调用标签,避免原始 token 累积到 ai_message.content。
+        // C4 hotfix:同时,SSE 事件 payload.delta 也必须走 filtered 版本,否则前端实时
+        // 渲染会暴露 <｜｜DSML｜｜...>...</｜｜DSML｜｜> 原始 token,跟 DB 表现不一致。
+        String cleanDelta = DsmlSanitizer.strip(delta);
+        if (cleanDelta.isEmpty()) {
+            // 整片 delta 都在 DSML 标签里,不广播也不写入 contentBuilder,
+            // 但仍要 emit 一个空 delta 的 SSE 事件以保持 offset 推进(否则前端可能卡住)。
+            ObjectNode payload = objectMapper.createObjectNode();
+            payload.put("delta", "");
+            payload.put("offset", offset);
+            payload.put("dsmlOnly", true); // 标记本次 chunk 仅含 DSML,前端可忽略
+            appendEvent(AiStreamEventService.TYPE_ASSISTANT_DELTA, payload);
+            return;
+        }
         ObjectNode payload = objectMapper.createObjectNode();
-        payload.put("delta", delta);
+        payload.put("delta", cleanDelta);
         payload.put("offset", offset);
         appendEvent(AiStreamEventService.TYPE_ASSISTANT_DELTA, payload);
 
-        // C2 hotfix:过滤掉 DSML 工具调用标签,避免原始 token 累积到 ai_message.content。
-        // 注意:SSE event(payload.delta)这里保留 raw,前端可以做不同渲染;
-        // 落库入 ai_message.content 走过滤后的内容。
-        String cleanDelta = DsmlSanitizer.strip(delta);
-        if (cleanDelta.isEmpty()) {
-            return; // 整片都在 DSML 标签里,不写到 contentBuilder,前端也不重复空内容
-        }
         contentBuilder.append(cleanDelta);
         AiMessage msg = new AiMessage();
         msg.setId(assistantMessageId);
