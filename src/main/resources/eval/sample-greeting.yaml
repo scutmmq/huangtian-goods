@@ -1,0 +1,6 @@
+name: greeting-pure-chat
+message: "你好呀!"
+expectNoTools: true
+expectKeywords:
+  - "你好"
+userId: 1001

@@ -1,0 +1,8 @@
+name: search-products
+message: "帮我找点饼干"
+expectTool: search_products
+expectKeywords:
+  - "饼干"
+  - "无匹配"
+  - "商品"
+userId: 1001

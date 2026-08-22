@@ -1,0 +1,6 @@
+name: my-orders
+message: "我最近的订单怎么样了？"
+expectTool: get_my_orders
+expectKeywords:
+  - "订单"
+userId: 1001
