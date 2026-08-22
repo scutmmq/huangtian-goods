@@ -161,19 +161,8 @@ public class ToolExecutionDispatcher {
     }
 
     private AgentToolResult safeExecute(MallAgentTool tool, JsonNode arguments, UserDTO currentUser) {
-        try {
-            toolSecurityInterceptor.preCheck(tool.name());
-            return MallUserContextExecutor.runAs(currentUser, () -> tool.execute(arguments));
-        } catch (ToolAccessDeniedException e) {
-            log.info("[AI][ORCH] tool denied: {} - user={} role={}",
-                    tool.name(),
-                    currentUser == null ? null : currentUser.getId(),
-                    e.getUserRole());
-            return AgentToolResult.ofText("工具 " + tool.name() + " 当前无权限调用(角色=" + e.getUserRole() + ")。");
-        } catch (Exception e) {
-            log.warn("[AI][ORCH] tool {} execution failed: {}", tool.name(), e.getMessage(), e);
-            return AgentToolResult.ofText("工具执行失败: " + e.getMessage());
-        }
+        // 2026-08-23 阶段 2 重构:逻辑搬到 ToolExecutor.safeExecute,统一同步/流式两条路径
+        return ToolExecutor.safeExecute(tool, arguments, currentUser, toolSecurityInterceptor);
     }
 
     private static String preview(String s, int max) {

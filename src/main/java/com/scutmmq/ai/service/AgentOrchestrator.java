@@ -158,20 +158,8 @@ public class AgentOrchestrator {
                     toolResult = AgentToolResult.ofText("工具不存在: " + call.getName());
                 } else {
                     long tt0 = System.currentTimeMillis();
-                    // 同步路径(safeExecute 的逻辑直接走,不走 dispatcher,因为没有 listener/capability)
-                    try {
-                        toolSecurityInterceptor.preCheck(tool.name());
-                        toolResult = MallUserContextExecutor.runAs(currentUser, () -> tool.execute(call.getArguments()));
-                    } catch (ToolAccessDeniedException e) {
-                        log.info("[AI][ORCH] tool denied: {} - user={} role={}",
-                                tool.name(),
-                                currentUser == null ? null : currentUser.getId(),
-                                e.getUserRole());
-                        toolResult = AgentToolResult.ofText("工具 " + tool.name() + " 当前无权限调用(角色=" + e.getUserRole() + ")。");
-                    } catch (Exception e) {
-                        log.warn("[AI][ORCH] tool {} execution failed: {}", tool.name(), e.getMessage(), e);
-                        toolResult = AgentToolResult.ofText("工具执行失败: " + e.getMessage());
-                    }
+                    // 2026-08-23 阶段 2 重构:统一走 ToolExecutor,和流式路径共享权限 + UserHolder 注入
+                    toolResult = ToolExecutor.safeExecute(tool, call.getArguments(), currentUser, toolSecurityInterceptor);
                     log.info("[AI][ORCH] tool {} executed in {}ms mode={} resultPreview=\"{}\" draft={}",
                             call.getName(),
                             System.currentTimeMillis() - tt0,
