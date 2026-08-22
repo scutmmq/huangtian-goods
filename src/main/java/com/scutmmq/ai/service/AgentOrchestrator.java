@@ -339,6 +339,17 @@ public class AgentOrchestrator {
                 messages.add(buildAssistantToolCallMessage(reply, toolCalls,
                         reasoning.isEmpty() ? null : reasoning));
 
+                // C11 安全网:DeepSeek stream 偶尔会留下空 name/空 id 的残留条目
+                // (例如 chunk 全部带空 id 且 index 不连续),过滤掉,避免执行时报"工具不存在"
+                // 也避免污染 buildAssistantToolCallMessage 的 tool_calls 字段
+                int beforeFilter = toolCalls.size();
+                toolCalls.removeIf(tc -> tc.getName() == null || tc.getName().isBlank()
+                        || tc.getId() == null || tc.getId().isBlank());
+                if (toolCalls.size() < beforeFilter) {
+                    log.warn("[AI][ORCH][STREAM] filtered {} phantom tool_calls (empty name or id)",
+                            beforeFilter - toolCalls.size());
+                }
+
                 // 顺序执行工具
                 for (AgentToolCall call : toolCalls) {
                     log.info("[AI][ORCH][STREAM] tool_call -> name={} id={} args={}",
@@ -497,11 +508,15 @@ public class AgentOrchestrator {
 
     /**
      * 把一个 stream 来的 ToolCallDelta 合并进 toolCalls 列表。
-     * 按 index 分组：首次出现就新建，后续则把 id/name 补齐 + arguments 字符串拼接。
+     * C11 修复:chunk.id 为空(纯 args 续传)时,强制按 index 合并,无论 slot 是否有 id。
+     * 旧逻辑要求 slot.id 也为空才合并 → args 续传时创建 phantom entry,
+     * phantom 的 args 被后续带完整 id/name 的 chunk 通过 by-id 匹配继承,
+     * 导致 draft_create_order 收到 search_products 的 args 等跨污染事故。
      */
-    private void mergeToolCallDelta(List<AgentToolCall> toolCalls, ToolCallDelta d) {
+    static void mergeToolCallDelta(List<AgentToolCall> toolCalls, ToolCallDelta d) {
         if (d == null) return;
         AgentToolCall existing = null;
+        // 先按 id 匹配(完整 id 的 chunk 通常是 tool_call 的起始/独立调用)
         for (AgentToolCall tc : toolCalls) {
             if (tc.getId() != null && !tc.getId().isEmpty()
                     && d.getId() != null && !d.getId().isEmpty()
@@ -511,10 +526,14 @@ public class AgentOrchestrator {
             }
         }
         if (existing == null) {
-            // 按 index 兜底：在还没有 id 的情况下用 index 匹配
-            if (d.getIndex() < toolCalls.size()) {
+            // 按 index 兜底
+            if (d.getIndex() >= 0 && d.getIndex() < toolCalls.size()) {
                 AgentToolCall slot = toolCalls.get(d.getIndex());
-                if (slot.getId() == null || slot.getId().isEmpty()) {
+                // C11 关键:chunk.id 为空 → 强制按 index 合并(args 续传场景)
+                if (d.getId() == null || d.getId().isEmpty()) {
+                    existing = slot;
+                } else if (slot.getId() == null || slot.getId().isEmpty()) {
+                    // slot 还没建好 id,但 chunk 有完整 id → 视为 slot 的补充
                     existing = slot;
                 }
             }
@@ -554,12 +573,12 @@ public class AgentOrchestrator {
         }
     }
 
-    private JsonNode parseArgumentsSafely(String raw) {
+    static JsonNode parseArgumentsSafely(String raw) {
         if (raw == null || raw.isEmpty()) {
-            return objectMapper.createObjectNode();
+            return STATIC_MAPPER.createObjectNode();
         }
         try {
-            JsonNode n = objectMapper.readTree(raw);
+            JsonNode n = STATIC_MAPPER.readTree(raw);
             if (n != null) {
                 return n;
             }
@@ -567,7 +586,7 @@ public class AgentOrchestrator {
             // 还在累积中，不是完整 JSON
         }
         // 仍在累积：用 raw 字符串保存到 JsonNode 里，方便后续 appendArguments 处理
-        ObjectNode node = objectMapper.createObjectNode();
+        ObjectNode node = STATIC_MAPPER.createObjectNode();
         node.put("__streaming__", raw);
         return node;
     }
