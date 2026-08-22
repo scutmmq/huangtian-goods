@@ -2,6 +2,7 @@ package com.scutmmq.ai.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.scutmmq.ai.config.AiAssistantProperties;
 import com.scutmmq.ai.dto.AiActionDraftVO;
 import com.scutmmq.ai.dto.AiChatRequest;
@@ -344,6 +345,32 @@ public class AiAssistantService {
                     assistantMessageId);
             log.info("[AI][RUN] persisted draft id={} type={} assistantMessageId={} expiresAt={}",
                     draft.getId(), draft.getActionType(), assistantMessageId, draft.getExpiresAt());
+
+            // C12 修复:持久化后 emit 第二个 draft.created SSE 事件,带 id 和 expiresAt。
+            // 第一个 SSE 事件在 PersistingOrchestratorListener.onDraftCreated 里 emit,
+            // 那时 draft 还没持久化,id/expiresAt 不可知。前端拿到第一事件后 msg.draft.id 是 undefined,
+            // 点击确认按钮 → store.confirmDraft(undefined) 直接返回 null → 不发请求 → "执行失败"。
+            // 这个补发事件让前端拿到完整 draft(id + expiresAt + actionType + ...),
+            // 前端 attachMetaToAssistant 会覆盖式赋值,补齐 msg.draft。
+            try {
+                ObjectNode payload = objectMapper.createObjectNode();
+                payload.put("id", draft.getId());
+                payload.put("actionType", draft.getActionType() == null ? "" : draft.getActionType());
+                payload.put("title", draft.getTitle() == null ? "" : draft.getTitle());
+                payload.put("summary", draft.getSummary() == null ? "" : draft.getSummary());
+                if (draft.getExpiresAt() != null) {
+                    payload.put("expiresAt", draft.getExpiresAt().toString());
+                }
+                if (p.getPayload() != null) {
+                    payload.set("payload", p.getPayload());
+                }
+                aiStreamEventService.append(
+                        runId, sessionId, assistantMessageId, user.getId(),
+                        AiStreamEventService.TYPE_DRAFT_CREATED, payload);
+            } catch (Exception e) {
+                log.warn("[AI][RUN] C12 emit follow-up draft.created failed draftId={} reason={}",
+                        draft.getId(), e.getMessage());
+            }
         }
 
         private void finalizeSession(AgentOrchestrator.AgentResult result) {

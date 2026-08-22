@@ -150,6 +150,9 @@ public class PersistingOrchestratorListener implements OrchestratorListener {
         if (draft.getPayload() != null) {
             payload.set("payload", draft.getPayload());
         }
+        // C12 注意:DraftPayload 没有 id/expiresAt 字段(那是 persist 之后才有)
+        // listener 在 persist 前只能 emit 部分信息。完整 draft(id+expiresAt)的 SSE
+        // 由 AiAssistantService.persistDraftIfPresent 在 persist 后 emit 第二个事件补齐。
         appendEvent(AiStreamEventService.TYPE_DRAFT_CREATED, payload);
     }
 
