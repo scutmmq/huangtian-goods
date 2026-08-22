@@ -1,0 +1,16 @@
+# C9 + C10 + C10.1 + C11 回归:搜索"自行车"必须真正命中
+# 之前 bug:SQL 缺 @Param → 返回全表前 5(橡皮擦/毛衣/排球)
+# 之前 bug:appendArguments 累积逻辑错误 → keyword=null
+# 之前 bug:mergeToolCallDelta phantom 跨污染 → keyword 串到别的工具
+name: regression-bicycle-search
+message: "我想购买自行车"
+expectTool: search_products
+expectToolArgsContains:
+  search_products:
+    keyword: "自行车"
+expectKeywords:
+  - "山地自行车"
+  - "找到"
+expectReplyNoDsml: true
+expectMaxToolExecutions: 5
+userId: 22

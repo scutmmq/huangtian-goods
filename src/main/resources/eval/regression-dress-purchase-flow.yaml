@@ -1,0 +1,14 @@
+# C0 + C11 回归:裙子购买链路
+# 之前 bug:并行工具 args 跨污染 — 选蛋糕裙时 keyword 串到 get_my_addresses
+name: regression-dress-purchase-flow
+message: "我想购买一条蛋糕裙,买 1 条,默认地址"
+expectTool: draft_create_order
+expectToolArgsContains:
+  draft_create_order:
+    quantity: "1"
+expectDraft: true
+expectDraftArgsContains:
+  quantity: "1"
+expectReplyNoDsml: true
+expectMaxToolExecutions: 8
+userId: 22

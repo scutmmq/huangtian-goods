@@ -1,0 +1,9 @@
+# C0 + C7 回归:任何回复都不应包含 DSML 标签
+# 这是通用回归:无论用户问什么,reply 不能含 <｜｜DSML｜｜...>...</｜｜DSML｜｜>
+# 之前 bug:DSML 标签作为 content 累积到 ai_message.content 和 SSE payload.delta
+# 用户能看到裸露的 "<｜｜DSML｜｜tool_calls>"
+name: regression-no-dsml-reply
+message: "你好"
+expectReplyNoDsml: true
+expectMaxToolExecutions: 3
+userId: 22

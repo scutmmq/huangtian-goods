@@ -16,3 +16,10 @@ spring:
           max-idle: 10
           min-idle: 1
           time-between-eviction-runs: 10s
+
+# C13:/dev/ai/eval/run HTTP 端点 — dev profile 启用,prod 默认关闭
+# 启用后会真的调 DeepSeek API(每个 case 5-30 秒),不要在生产环境开
+ai:
+  capability:
+    eval:
+      enabled: true

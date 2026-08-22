@@ -1,0 +1,16 @@
+# C0 + C11 回归:橡皮擦下单链路
+# 之前 bug:工具 args 累积丢失 → keyword=null / 缺少必填参数
+# 之前 bug:草稿幻觉 → 模型声称"已下单"但实际没生成草稿
+name: regression-eraser-purchase-flow
+message: "我想买 100 个橡皮擦,商品 5,地址 1"
+expectTool: draft_create_order
+expectToolArgsContains:
+  draft_create_order:
+    quantity: "100"
+expectDraft: true
+expectDraftArgsContains:
+  productId: "5"
+  quantity: "100"
+expectReplyNoDsml: true
+expectMaxToolExecutions: 8
+userId: 22

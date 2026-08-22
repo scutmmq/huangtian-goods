@@ -1,0 +1,26 @@
+# C0 + C11 + C12 回归:自行车完整下单链路
+# 关键断言:
+#   - expectDraft: 必须产出 draft(防幻觉)
+#   - expectDraftArgsContains.productId: 9 (山地自行车)
+#   - expectDraftArgsContains.shippingAddressId: 16
+#   - expectMaxToolExecutions: 8 (不能死循环)
+#   - expectReplyNoDsml: 回复不含 DSML
+# 之前 bug:用户说"自行车"+"默认地址"+"1 辆"后,模型要 draft_create_order 时
+# productId/quantity/shippingAddressId 全 null,生成空草稿(用户看不到确认按钮)。
+name: regression-bicycle-full-flow
+message: "我想购买 1 辆自行车,默认地址"
+expectTool: draft_create_order
+expectToolArgsContains:
+  draft_create_order:
+    quantity: "1"
+expectDraft: true
+expectDraftArgsContains:
+  productId: "9"
+  quantity: "1"
+  shippingAddressId: "16"
+expectKeywords:
+  - "山地自行车"
+  - "确认"
+expectReplyNoDsml: true
+expectMaxToolExecutions: 8
+userId: 22
