@@ -597,6 +597,17 @@ public class AgentOrchestrator {
         }
 
         String merged = prev + delta;
+
+        // C10.1 边界修复:模型首 chunk 常只发 "{",次 chunk 又发完整对象 {..."..."}  →
+        // prev+delta 产生 "{{..." 永远不合 JSON。strip 多余的 "{"
+        // 同时:parseArgumentsSafely 在空字符串时存 {} 进 __streaming__,
+        // prev="{}" + delta='{"a":1}' → "{}{\"a\":1}" 也不合 JSON,strip "{}"
+        if (merged.startsWith("{{")) {
+            merged = merged.substring(1);
+        } else if (merged.startsWith("{}")) {
+            merged = merged.substring(2);
+        }
+
         try {
             JsonNode n = STATIC_MAPPER.readTree(merged);
             if (n != null) {

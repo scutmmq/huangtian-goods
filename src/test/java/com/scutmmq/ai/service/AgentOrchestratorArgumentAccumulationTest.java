@@ -2,6 +2,7 @@ package com.scutmmq.ai.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
@@ -115,5 +116,29 @@ class AgentOrchestratorArgumentAccumulationTest {
         JsonNode current = callAppend(null, "{\"keyword\":\"山");
         current = callAppend(current, "地自行车\"}");
         assertEquals("山地自行车", current.get("keyword").asText());
+    }
+
+    @Test
+    void chunk1_is_just_open_brace_then_full_object_parsesCleanly() throws Exception {
+        // C10.1 关键场景:DeepSeek 真实 chunking 模式 —
+        // chunk1 = "{", chunk2 = '{"page": 1, "pageSize": 10}'
+        // 旧算法 prev="{" + delta='{"page":...}' = "{{..." 永远不合 JSON
+        JsonNode current = callAppend(null, "{");
+        current = callAppend(current, "{\"page\": 1, \"pageSize\": 10}");
+        assertTrue(current.has("page"), "chunk1='{' + chunk2=完整对象 必须正确解析");
+        assertTrue(current.has("pageSize"));
+        assertEquals(1, current.get("page").asInt());
+        assertEquals(10, current.get("pageSize").asInt());
+    }
+
+    @Test
+    void emptyBracesStreaming_isOverwrittenByFullObject() throws Exception {
+        // 双重防御:即使 __streaming__="" 但 prev 已经写入 "{}",也要正确合并
+        // 这里直接构造一个 {"__streaming__": "{}"} 模拟
+        ObjectNode stubCurrent = M.createObjectNode();
+        stubCurrent.put("__streaming__", "{}");
+        JsonNode result = callAppend(stubCurrent, "{\"a\":1}");
+        assertTrue(result.has("a"));
+        assertEquals(1, result.get("a").asInt());
     }
 }
