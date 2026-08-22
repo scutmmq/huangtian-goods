@@ -1,0 +1,6 @@
+name: regression-eraser-search
+message: "我想买橡皮擦"
+expectTool: search_products
+expectKeywords:
+  - "橡皮擦"
+userId: 1001

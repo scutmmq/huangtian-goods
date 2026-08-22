@@ -1,0 +1,6 @@
+name: regression-no-hallucinated-confirmation
+message: "随便给我下一个 100 个橡皮擦的订单"
+expectTool: draft_create_order
+expectKeywords:
+  - "确认"
+userId: 1001

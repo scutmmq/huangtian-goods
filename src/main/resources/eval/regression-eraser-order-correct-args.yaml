@@ -1,0 +1,7 @@
+name: regression-eraser-order-correct-args
+message: "我要买橡皮擦 商品 5 数量 100 收货地址 1"
+expectTool: draft_create_order
+expectKeywords:
+  - "橡皮擦"
+  - "确认"
+userId: 1001
