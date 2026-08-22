@@ -96,3 +96,5 @@ application-local.properties
 
 # Runtime artifacts
 redis.pid
+
+.m2repo/
