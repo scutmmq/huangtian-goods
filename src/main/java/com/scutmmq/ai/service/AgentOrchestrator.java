@@ -2,7 +2,6 @@ package com.scutmmq.ai.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.scutmmq.ai.capability.CapabilityRegistry;
 import com.scutmmq.ai.capability.RunContext;
 import com.scutmmq.ai.capability.RunResult;
@@ -42,7 +41,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Service
 public class AgentOrchestrator {
 
-    private static final ObjectMapper STATIC_MAPPER = new ObjectMapper();
+    /**
+     * 单测里通过反射调 {@code AgentOrchestrator.appendArguments(...)} 等静态助手方法。
+     * 实际逻辑现在在 ToolCallAccumulator 里,这里保留一个共享实例作为委托,
+     * 这样单测不需要改也能通过。新代码请直接构造 ToolCallAccumulator。
+     */
+    private static final ToolCallAccumulator STATIC_ACCUMULATOR =
+            new ToolCallAccumulator(new ObjectMapper());
 
     private final AiChatClient aiChatClient;
     private final MallSkillRegistry skillRegistry;
@@ -51,6 +56,21 @@ public class AgentOrchestrator {
     private final ObjectMapper objectMapper;
     private final CapabilityRegistry capabilityRegistry;
     private final ToolSecurityInterceptor toolSecurityInterceptor;
+
+    /**
+     * 2026-08-23 重构抽出:把脆弱的 tool_call 流式累积逻辑封到一个类。
+     */
+    private final ToolCallAccumulator toolCallAccumulator;
+
+    /**
+     * 2026-08-23 重构抽出:OpenAI Chat Completions 协议消息构造。
+     */
+    private final ModelMessageBuilder messageBuilder;
+
+    /**
+     * 2026-08-23 重构抽出:工具执行调度(权限/上下文/事件/C8 重复拦截/C11 phantom 过滤)。
+     */
+    private final ToolExecutionDispatcher toolDispatcher;
 
     public AgentOrchestrator(AiChatClient aiChatClient,
                              MallSkillRegistry skillRegistry,
@@ -66,6 +86,11 @@ public class AgentOrchestrator {
         this.objectMapper = objectMapper;
         this.capabilityRegistry = capabilityRegistry;
         this.toolSecurityInterceptor = toolSecurityInterceptor;
+        // 抽出后的子组件 — 让 AgentOrchestrator 回归"装配 + 主循环"职责
+        this.toolCallAccumulator = new ToolCallAccumulator(objectMapper);
+        this.messageBuilder = new ModelMessageBuilder(objectMapper);
+        this.toolDispatcher = new ToolExecutionDispatcher(
+                skillRegistry, toolSecurityInterceptor, capabilityRegistry, toolCallAccumulator);
     }
 
     /**
@@ -119,7 +144,8 @@ public class AgentOrchestrator {
             }
 
             // 追加一条 assistant 消息（带 tool_calls + 可选的 reasoning_content）
-            messages.add(buildAssistantToolCallMessage(reply, result.getToolCalls(), result.getReasoningContent()));
+            // 2026-08-23 重构:OpenAI 协议消息走 ModelMessageBuilder
+            messages.add(messageBuilder.buildAssistantToolCallMessage(reply, result.getToolCalls(), result.getReasoningContent()));
 
             // 执行每个工具
             for (AgentToolCall call : result.getToolCalls()) {
@@ -132,7 +158,20 @@ public class AgentOrchestrator {
                     toolResult = AgentToolResult.ofText("工具不存在: " + call.getName());
                 } else {
                     long tt0 = System.currentTimeMillis();
-                    toolResult = safeExecute(tool, call.getArguments(), currentUser);
+                    // 同步路径(safeExecute 的逻辑直接走,不走 dispatcher,因为没有 listener/capability)
+                    try {
+                        toolSecurityInterceptor.preCheck(tool.name());
+                        toolResult = MallUserContextExecutor.runAs(currentUser, () -> tool.execute(call.getArguments()));
+                    } catch (ToolAccessDeniedException e) {
+                        log.info("[AI][ORCH] tool denied: {} - user={} role={}",
+                                tool.name(),
+                                currentUser == null ? null : currentUser.getId(),
+                                e.getUserRole());
+                        toolResult = AgentToolResult.ofText("工具 " + tool.name() + " 当前无权限调用(角色=" + e.getUserRole() + ")。");
+                    } catch (Exception e) {
+                        log.warn("[AI][ORCH] tool {} execution failed: {}", tool.name(), e.getMessage(), e);
+                        toolResult = AgentToolResult.ofText("工具执行失败: " + e.getMessage());
+                    }
                     log.info("[AI][ORCH] tool {} executed in {}ms mode={} resultPreview=\"{}\" draft={}",
                             call.getName(),
                             System.currentTimeMillis() - tt0,
@@ -146,7 +185,7 @@ public class AgentOrchestrator {
                     draft = toolResult.getDraft();
                 }
 
-                messages.add(buildToolResponseMessage(call.getId(), call.getName(), toolResult.getContent()));
+                messages.add(messageBuilder.buildToolResponseMessage(call.getId(), call.getName(), toolResult.getContent()));
             }
 
             // 如果是最后一次循环还在请求工具，说明 maxIter 不够。标记下来，循环外强制再喊一次。
@@ -250,10 +289,7 @@ public class AgentOrchestrator {
                 .build();
 
         boolean stillWantsTools = false;
-        // C8 修复:跟踪工具调用签名,检测重复死循环(同一 tool+args 反复调)。
-        // 死循环场景:"搜 X 商品"返回 0 / 不相关 → 模型反复重搜 → maxIter 耗尽 → 用户看到错误。
-        // 在 (name, args hash) 第二次出现时返回 sentinel,逼模型立即给最终回复。
-        Map<String, Integer> toolCallCounts = new HashMap<>();
+        // C8 重复死循环检测已搬到 ToolExecutionDispatcher.dispatch()
         try {
             for (int iter = 0; iter < maxIter; iter++) {
                 log.info("[AI][ORCH][STREAM] ---- iteration {}/{} : sending {} messages to model ----",
@@ -297,8 +333,9 @@ public class AgentOrchestrator {
                     @Override
                     public void onToolCallDelta(List<ToolCallDelta> deltas) {
                         if (deltas == null || deltas.isEmpty()) return;
+                        // 2026-08-23 重构:tool call 累积逻辑搬到 ToolCallAccumulator
                         for (ToolCallDelta d : deltas) {
-                            mergeToolCallDelta(toolCalls, d);
+                            toolCallAccumulator.mergeDelta(toolCalls, d);
                         }
                     }
 
@@ -336,87 +373,28 @@ public class AgentOrchestrator {
                 }
 
                 // 追加 assistant 消息（带 tool_calls + reasoning_content）
-                messages.add(buildAssistantToolCallMessage(reply, toolCalls,
+                // 2026-08-23 重构:走 ModelMessageBuilder(OpenAI 协议字段集中处)
+                messages.add(messageBuilder.buildAssistantToolCallMessage(reply, toolCalls,
                         reasoning.isEmpty() ? null : reasoning));
 
-                // C11 安全网:DeepSeek stream 偶尔会留下空 name/空 id 的残留条目
-                // (例如 chunk 全部带空 id 且 index 不连续),过滤掉,避免执行时报"工具不存在"
-                // 也避免污染 buildAssistantToolCallMessage 的 tool_calls 字段
-                int beforeFilter = toolCalls.size();
-                toolCalls.removeIf(tc -> tc.getName() == null || tc.getName().isBlank()
-                        || tc.getId() == null || tc.getId().isBlank());
-                if (toolCalls.size() < beforeFilter) {
-                    log.warn("[AI][ORCH][STREAM] filtered {} phantom tool_calls (empty name or id)",
-                            beforeFilter - toolCalls.size());
+                // C11 安全网:过滤空 name/id 的 phantom tool calls。
+                // 2026-08-23 重构:逻辑搬到了 ToolExecutionDispatcher.filterPhantoms。
+                toolDispatcher.filterPhantoms(toolCalls);
+
+                // 2026-08-23 重构:工具执行循环全权委托给 ToolExecutionDispatcher,
+                // 包含 C8 重复拦截 + capability 事件 + listener 回调 + 权限 + UserHolder 注入。
+                ToolExecutionDispatcher.ExecutionResult dispatchResult =
+                        toolDispatcher.dispatch(toolCalls, listener, currentUser, runCtx);
+
+                // 收集执行记录 + 喂回模型
+                for (ToolExecutionDispatcher.ExecutionRecord er : dispatchResult.records()) {
+                    executions.add(new ToolExecutionRecord(
+                            er.call().getName(), er.call().getArguments(), er.result().getContent()));
+                    messages.add(messageBuilder.buildToolResponseMessage(
+                            er.call().getId(), er.call().getName(), er.result().getContent()));
                 }
-
-                // 顺序执行工具
-                for (AgentToolCall call : toolCalls) {
-                    log.info("[AI][ORCH][STREAM] tool_call -> name={} id={} args={}",
-                            call.getName(), call.getId(), call.getArguments());
-                    safeOnToolStarted(listener, call.getId(), call.getName(), call.getArguments());
-
-                    long toolStartMs = System.currentTimeMillis();
-
-                    // C8:重复工具调用检测。同一 (name, args) 第二次出现时直接返回 sentinel,
-                    // 防止模型陷入死循环(典型场景:搜不到商品反复重搜,直到 maxIter 耗尽)。
-                    String signature = computeToolSignature(call.getName(), call.getArguments());
-                    int priorCount = toolCallCounts.getOrDefault(signature, 0);
-                    toolCallCounts.put(signature, priorCount + 1);
-
-                    AgentToolResult toolResult;
-                    boolean interceptedDuplicate = false;
-                    MallAgentTool tool = skillRegistry.findByName(call.getName());
-                    if (priorCount >= 1) {
-                        // 第二次起返回 sentinel,不真正执行。
-                        interceptedDuplicate = true;
-                        String sentinel = buildDuplicateSentinel(call.getName(), priorCount + 1);
-                        log.warn("[AI][ORCH][STREAM] duplicate tool call intercepted name={} sig={} count={}",
-                                call.getName(), signature, priorCount + 1);
-                        toolResult = AgentToolResult.ofText(sentinel);
-                    } else if (tool == null) {
-                        log.warn("[AI][ORCH][STREAM] unknown tool requested by model: {}", call.getName());
-                        toolResult = AgentToolResult.ofText("工具不存在: " + call.getName());
-                    } else {
-                        long tt0 = System.currentTimeMillis();
-                        toolResult = safeExecute(tool, call.getArguments(), currentUser);
-                        log.info("[AI][ORCH][STREAM] tool {} executed in {}ms mode={} resultPreview=\"{}\" draft={}",
-                                call.getName(),
-                                System.currentTimeMillis() - tt0,
-                                tool.mode(),
-                                preview(toolResult.getContent(), 200),
-                                toolResult.getDraft() == null ? "none" : toolResult.getDraft().getActionType());
-                    }
-
-                    executions.add(new ToolExecutionRecord(call.getName(), call.getArguments(), toolResult.getContent()));
-                    if (toolResult.getDraft() != null) {
-                        draft = toolResult.getDraft();
-                        safeOnDraftCreated(listener, draft);
-                        capabilityRegistry.publishDraftCreated(
-                                runCtx.getRunId(), runCtx.getSessionId(), runCtx.getUserId(),
-                                draft.getActionType(), draft.getTitle(), draft.getSummary(),
-                                draft.getPayload());
-                    }
-
-                    // B2:每个工具执行完发布 ToolExecutedEvent,observability 用。
-                    // 被拦截的重复调用标记 toolSuccess=false,reason="duplicate-intercepted",
-                    // 这样在 metrics 里能区分"业务失败"和"框架拦截的循环"。
-                    boolean toolSuccess = !interceptedDuplicate
-                            && (tool != null && toolResult.getDraft() == null
-                            || (toolResult != null && toolResult.getContent() != null
-                                    && !toolResult.getContent().startsWith("工具执行失败")));
-                    capabilityRegistry.publishToolExecuted(
-                            ToolContext.fromRun(runCtx, call.getName(), call.getId(),
-                                    call.getArguments(),
-                                    toolResult == null ? "" : safeTruncate(toolResult.getContent(), 200),
-                                    toolResult != null && toolResult.getDraft() != null,
-                                    toolSuccess,
-                                    interceptedDuplicate ? "duplicate-intercepted" : null,
-                                    toolStartMs, System.currentTimeMillis()));
-                    safeOnToolFinished(listener, call.getId(), call.getName(), toolResult.getContent(),
-                            toolResult.getDraft() != null);
-
-                    messages.add(buildToolResponseMessage(call.getId(), call.getName(), toolResult.getContent()));
+                if (dispatchResult.draft() != null) {
+                    draft = dispatchResult.draft();
                 }
 
                 stillWantsTools = (iter == maxIter - 1);
@@ -512,83 +490,19 @@ public class AgentOrchestrator {
      * 旧逻辑要求 slot.id 也为空才合并 → args 续传时创建 phantom entry,
      * phantom 的 args 被后续带完整 id/name 的 chunk 通过 by-id 匹配继承,
      * 导致 draft_create_order 收到 search_products 的 args 等跨污染事故。
+     *
+     * <p>2026-08-23 重构:实际逻辑搬到 {@link ToolCallAccumulator#mergeDelta},
+     * 这里保留为薄委托,让单测可以通过反射调用而不需要重构测试。
+     * 新代码请直接调用 ToolCallAccumulator。
      */
     static void mergeToolCallDelta(List<AgentToolCall> toolCalls, ToolCallDelta d) {
-        if (d == null) return;
-        AgentToolCall existing = null;
-        // 先按 id 匹配(完整 id 的 chunk 通常是 tool_call 的起始/独立调用)
-        for (AgentToolCall tc : toolCalls) {
-            if (tc.getId() != null && !tc.getId().isEmpty()
-                    && d.getId() != null && !d.getId().isEmpty()
-                    && tc.getId().equals(d.getId())) {
-                existing = tc;
-                break;
-            }
-        }
-        if (existing == null) {
-            // 按 index 兜底
-            if (d.getIndex() >= 0 && d.getIndex() < toolCalls.size()) {
-                AgentToolCall slot = toolCalls.get(d.getIndex());
-                // C11 关键:chunk.id 为空 → 强制按 index 合并(args 续传场景)
-                if (d.getId() == null || d.getId().isEmpty()) {
-                    existing = slot;
-                } else if (slot.getId() == null || slot.getId().isEmpty()) {
-                    // slot 还没建好 id,但 chunk 有完整 id → 视为 slot 的补充
-                    existing = slot;
-                }
-            }
-        }
-
-        if (existing == null) {
-            // 新建一条
-            String id = d.getId() == null ? "" : d.getId();
-            String name = d.getName() == null ? "" : d.getName();
-            JsonNode argsNode = parseArgumentsSafely(d.getArgumentsDelta());
-            AgentToolCall fresh = new AgentToolCall(id, name, argsNode);
-            // 确保 id 尚未被别的占用
-            for (AgentToolCall tc : toolCalls) {
-                if (id.equals(tc.getId())) {
-                    // 已存在的同 id 条目，跳过新建
-                    existing = tc;
-                    break;
-                }
-            }
-            if (existing == null) {
-                toolCalls.add(fresh);
-                existing = fresh;
-            }
-        }
-
-        // 补齐 id/name
-        if ((existing.getId() == null || existing.getId().isEmpty()) && d.getId() != null && !d.getId().isEmpty()) {
-            existing.setId(d.getId());
-        }
-        if ((existing.getName() == null || existing.getName().isEmpty()) && d.getName() != null && !d.getName().isEmpty()) {
-            existing.setName(d.getName());
-        }
-        // 追加 arguments 增量（合并到现有 JsonNode 里）
-        if (d.getArgumentsDelta() != null && !d.getArgumentsDelta().isEmpty()) {
-            JsonNode merged = appendArguments(existing.getArguments(), d.getArgumentsDelta());
-            existing.setArguments(merged);
-        }
+        STATIC_ACCUMULATOR.mergeDelta(toolCalls, d);
     }
 
+    /** @deprecated 使用 {@link ToolCallAccumulator#parseFirstChunk} */
+    @Deprecated
     static JsonNode parseArgumentsSafely(String raw) {
-        if (raw == null || raw.isEmpty()) {
-            return STATIC_MAPPER.createObjectNode();
-        }
-        try {
-            JsonNode n = STATIC_MAPPER.readTree(raw);
-            if (n != null) {
-                return n;
-            }
-        } catch (Exception ignored) {
-            // 还在累积中，不是完整 JSON
-        }
-        // 仍在累积：用 raw 字符串保存到 JsonNode 里，方便后续 appendArguments 处理
-        ObjectNode node = STATIC_MAPPER.createObjectNode();
-        node.put("__streaming__", raw);
-        return node;
+        return STATIC_ACCUMULATOR.parseFirstChunk(raw);
     }
 
     /**
@@ -598,46 +512,12 @@ public class AgentOrchestrator {
      * 产生 "{}{...}" 这种永远不合法的字符串,args 永远停在 __streaming__ 阶段,
      * 工具收到 keyword=null / productId=null → 全表前 5 / "缺少必填参数"。
      *
-     * <p>修法:统一从 current 抽取原始字符串 + 拼接 delta + 整体 parse。
-     * current 是空 {} 也视为无 raw,只取 delta。
+     * <p>2026-08-23 重构:实际逻辑搬到 {@link ToolCallAccumulator#appendChunk},
+     * 这里保留为薄委托。
      */
+    @Deprecated
     static JsonNode appendArguments(JsonNode current, String delta) {
-        if (delta == null || delta.isEmpty()) return current;
-
-        // 把 current 还原为 raw 字符串
-        String prev = "";
-        if (current != null && current.isObject() && current.has("__streaming__")) {
-            prev = current.get("__streaming__").asText("");
-        } else if (current != null && current.isObject() && current.size() == 0) {
-            // 空 {} → 当作 null 处理,否则 "{}"+delta 会变成 "{}{...}" 永远不合 JSON
-            prev = "";
-        } else if (current != null) {
-            prev = current.toString();
-        }
-
-        String merged = prev + delta;
-
-        // C10.1 边界修复:模型首 chunk 常只发 "{",次 chunk 又发完整对象 {..."..."}  →
-        // prev+delta 产生 "{{..." 永远不合 JSON。strip 多余的 "{"
-        // 同时:parseArgumentsSafely 在空字符串时存 {} 进 __streaming__,
-        // prev="{}" + delta='{"a":1}' → "{}{\"a\":1}" 也不合 JSON,strip "{}"
-        if (merged.startsWith("{{")) {
-            merged = merged.substring(1);
-        } else if (merged.startsWith("{}")) {
-            merged = merged.substring(2);
-        }
-
-        try {
-            JsonNode n = STATIC_MAPPER.readTree(merged);
-            if (n != null) {
-                return n;  // 凑齐了,返回 parsed JSON
-            }
-        } catch (Exception ignored) {
-            // 还在累积
-        }
-        ObjectNode node = STATIC_MAPPER.createObjectNode();
-        node.put("__streaming__", merged);
-        return node;
+        return STATIC_ACCUMULATOR.appendChunk(current, delta);
     }
 
     private void safeOnAssistantDelta(OrchestratorListener listener, String delta, int offset) {
@@ -645,31 +525,6 @@ public class AgentOrchestrator {
             listener.onAssistantDelta(delta, offset);
         } catch (Exception e) {
             log.warn("[AI][ORCH][STREAM] listener.onAssistantDelta threw: {}", e.getMessage(), e);
-        }
-    }
-
-    private void safeOnToolStarted(OrchestratorListener listener, String id, String name, JsonNode args) {
-        try {
-            listener.onToolStarted(id, name, args);
-        } catch (Exception e) {
-            log.warn("[AI][ORCH][STREAM] listener.onToolStarted threw: {}", e.getMessage(), e);
-        }
-    }
-
-    private void safeOnToolFinished(OrchestratorListener listener, String id, String name,
-                                    String content, boolean hasDraft) {
-        try {
-            listener.onToolFinished(id, name, content, hasDraft);
-        } catch (Exception e) {
-            log.warn("[AI][ORCH][STREAM] listener.onToolFinished threw: {}", e.getMessage(), e);
-        }
-    }
-
-    private void safeOnDraftCreated(OrchestratorListener listener, AgentToolResult.DraftPayload draft) {
-        try {
-            listener.onDraftCreated(draft);
-        } catch (Exception e) {
-            log.warn("[AI][ORCH][STREAM] listener.onDraftCreated threw: {}", e.getMessage(), e);
         }
     }
 
@@ -689,23 +544,6 @@ public class AgentOrchestrator {
         }
     }
 
-    private AgentToolResult safeExecute(MallAgentTool tool, JsonNode arguments, UserDTO currentUser) {
-        try {
-            // B2:工具执行前先做角色权限校验,ToolSecurityInterceptor.preCheck 抛异常即视为拒绝
-            toolSecurityInterceptor.preCheck(tool.name());
-            return MallUserContextExecutor.runAs(currentUser, () -> tool.execute(arguments));
-        } catch (ToolAccessDeniedException e) {
-            log.info("[AI][ORCH] tool denied: {} - user={} role={}",
-                    tool.name(),
-                    currentUser == null ? null : currentUser.getId(),
-                    e.getUserRole());
-            return AgentToolResult.ofText("工具 " + tool.name() + " 当前无权限调用（角色=" + e.getUserRole() + "）。");
-        } catch (Exception e) {
-            log.warn("[AI][ORCH] tool {} execution failed: {}", tool.name(), e.getMessage(), e);
-            return AgentToolResult.ofText("工具执行失败: " + e.getMessage());
-        }
-    }
-
     private static String preview(String s, int max) {
         if (s == null) return "";
         String t = s.replace("\n", " ").replace("\r", " ");
@@ -720,64 +558,24 @@ public class AgentOrchestrator {
     /**
      * C8:计算工具调用签名,用于检测重复。
      * 同一 (name, args 序列化) 在一次 Run 内重复出现即视为死循环信号。
+     *
+     * <p>2026-08-23 重构:实际逻辑搬到 {@link ToolCallAccumulator#computeSignature}。
      */
+    @Deprecated
     static String computeToolSignature(String name, JsonNode arguments) {
-        String argsStr = (arguments == null || arguments.isNull()) ? "null" : arguments.toString();
-        return name + "|" + argsStr;
+        return STATIC_ACCUMULATOR.computeSignature(name, arguments);
     }
 
     /**
      * C8:被拦截的重复工具调用,返回给模型的 sentinel 内容。
      * 必须明确说「请立即给最终回复,不要再调用此工具」,
      * 模型收到这个 tool_response 后通常会终止迭代。
+     *
+     * <p>2026-08-23 重构:实际逻辑搬到 {@link ToolCallAccumulator#buildDuplicateSentinel}。
      */
+    @Deprecated
     static String buildDuplicateSentinel(String name, int count) {
-        return "[系统提示] 工具 " + name + " 已经用相同参数调用过 " + count
-                + " 次,结果不会改变。请立即停止重复调用,直接给用户最终回复"
-                + "(可以基于之前的结果,或直接告知商城中没有该商品)。不要再调用此工具。";
-    }
-
-    private Map<String, Object> buildAssistantToolCallMessage(String content,
-                                                               List<AgentToolCall> toolCalls,
-                                                               String reasoningContent) {
-        Map<String, Object> message = new LinkedHashMap<>();
-        message.put("role", "assistant");
-        message.put("content", content == null ? "" : content);
-        // DeepSeek thinking 模式：必须原样把 reasoning_content 送回去，否则下一轮 400。
-        if (reasoningContent != null && !reasoningContent.isEmpty()) {
-            message.put("reasoning_content", reasoningContent);
-        }
-        List<Map<String, Object>> openAiToolCalls = new ArrayList<>();
-        for (AgentToolCall call : toolCalls) {
-            Map<String, Object> function = new LinkedHashMap<>();
-            function.put("name", call.getName());
-            function.put("arguments", argumentsAsString(call.getArguments()));
-
-            Map<String, Object> wrapped = new LinkedHashMap<>();
-            wrapped.put("id", call.getId());
-            wrapped.put("type", "function");
-            wrapped.put("function", function);
-            openAiToolCalls.add(wrapped);
-        }
-        message.put("tool_calls", openAiToolCalls);
-        return message;
-    }
-
-    private Map<String, Object> buildToolResponseMessage(String toolCallId, String toolName, String content) {
-        Map<String, Object> message = new LinkedHashMap<>();
-        message.put("role", "tool");
-        message.put("tool_call_id", toolCallId);
-        message.put("name", toolName);
-        message.put("content", content == null ? "" : content);
-        return message;
-    }
-
-    private String argumentsAsString(JsonNode arguments) {
-        try {
-            return objectMapper.writeValueAsString(arguments == null ? objectMapper.createObjectNode() : arguments);
-        } catch (Exception e) {
-            return "{}";
-        }
+        return STATIC_ACCUMULATOR.buildDuplicateSentinel(name, count);
     }
 
     public record HistoryMessage(String role, String content) {
