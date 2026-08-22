@@ -27,6 +27,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -247,6 +248,10 @@ public class AgentOrchestrator {
                 .build();
 
         boolean stillWantsTools = false;
+        // C8 修复:跟踪工具调用签名,检测重复死循环(同一 tool+args 反复调)。
+        // 死循环场景:"搜 X 商品"返回 0 / 不相关 → 模型反复重搜 → maxIter 耗尽 → 用户看到错误。
+        // 在 (name, args hash) 第二次出现时返回 sentinel,逼模型立即给最终回复。
+        Map<String, Integer> toolCallCounts = new HashMap<>();
         try {
             for (int iter = 0; iter < maxIter; iter++) {
                 log.info("[AI][ORCH][STREAM] ---- iteration {}/{} : sending {} messages to model ----",
@@ -339,9 +344,24 @@ public class AgentOrchestrator {
                     safeOnToolStarted(listener, call.getId(), call.getName(), call.getArguments());
 
                     long toolStartMs = System.currentTimeMillis();
-                    MallAgentTool tool = skillRegistry.findByName(call.getName());
+
+                    // C8:重复工具调用检测。同一 (name, args) 第二次出现时直接返回 sentinel,
+                    // 防止模型陷入死循环(典型场景:搜不到商品反复重搜,直到 maxIter 耗尽)。
+                    String signature = computeToolSignature(call.getName(), call.getArguments());
+                    int priorCount = toolCallCounts.getOrDefault(signature, 0);
+                    toolCallCounts.put(signature, priorCount + 1);
+
                     AgentToolResult toolResult;
-                    if (tool == null) {
+                    boolean interceptedDuplicate = false;
+                    MallAgentTool tool = skillRegistry.findByName(call.getName());
+                    if (priorCount >= 1) {
+                        // 第二次起返回 sentinel,不真正执行。
+                        interceptedDuplicate = true;
+                        String sentinel = buildDuplicateSentinel(call.getName(), priorCount + 1);
+                        log.warn("[AI][ORCH][STREAM] duplicate tool call intercepted name={} sig={} count={}",
+                                call.getName(), signature, priorCount + 1);
+                        toolResult = AgentToolResult.ofText(sentinel);
+                    } else if (tool == null) {
                         log.warn("[AI][ORCH][STREAM] unknown tool requested by model: {}", call.getName());
                         toolResult = AgentToolResult.ofText("工具不存在: " + call.getName());
                     } else {
@@ -365,16 +385,20 @@ public class AgentOrchestrator {
                                 draft.getPayload());
                     }
 
-                    // B2:每个工具执行完发布 ToolExecutedEvent,observability 用
-                    boolean toolSuccess = tool != null && toolResult.getDraft() == null
+                    // B2:每个工具执行完发布 ToolExecutedEvent,observability 用。
+                    // 被拦截的重复调用标记 toolSuccess=false,reason="duplicate-intercepted",
+                    // 这样在 metrics 里能区分"业务失败"和"框架拦截的循环"。
+                    boolean toolSuccess = !interceptedDuplicate
+                            && (tool != null && toolResult.getDraft() == null
                             || (toolResult != null && toolResult.getContent() != null
-                                    && !toolResult.getContent().startsWith("工具执行失败"));
+                                    && !toolResult.getContent().startsWith("工具执行失败")));
                     capabilityRegistry.publishToolExecuted(
                             ToolContext.fromRun(runCtx, call.getName(), call.getId(),
                                     call.getArguments(),
                                     toolResult == null ? "" : safeTruncate(toolResult.getContent(), 200),
                                     toolResult != null && toolResult.getDraft() != null,
-                                    toolSuccess, null,
+                                    toolSuccess,
+                                    interceptedDuplicate ? "duplicate-intercepted" : null,
                                     toolStartMs, System.currentTimeMillis()));
                     safeOnToolFinished(listener, call.getId(), call.getName(), toolResult.getContent(),
                             toolResult.getDraft() != null);
@@ -651,6 +675,26 @@ public class AgentOrchestrator {
     private static String safeTruncate(String s, int max) {
         if (s == null) return "";
         return s.length() <= max ? s : s.substring(0, max) + "...";
+    }
+
+    /**
+     * C8:计算工具调用签名,用于检测重复。
+     * 同一 (name, args 序列化) 在一次 Run 内重复出现即视为死循环信号。
+     */
+    static String computeToolSignature(String name, JsonNode arguments) {
+        String argsStr = (arguments == null || arguments.isNull()) ? "null" : arguments.toString();
+        return name + "|" + argsStr;
+    }
+
+    /**
+     * C8:被拦截的重复工具调用,返回给模型的 sentinel 内容。
+     * 必须明确说「请立即给最终回复,不要再调用此工具」,
+     * 模型收到这个 tool_response 后通常会终止迭代。
+     */
+    static String buildDuplicateSentinel(String name, int count) {
+        return "[系统提示] 工具 " + name + " 已经用相同参数调用过 " + count
+                + " 次,结果不会改变。请立即停止重复调用,直接给用户最终回复"
+                + "(可以基于之前的结果,或直接告知商城中没有该商品)。不要再调用此工具。";
     }
 
     private Map<String, Object> buildAssistantToolCallMessage(String content,
