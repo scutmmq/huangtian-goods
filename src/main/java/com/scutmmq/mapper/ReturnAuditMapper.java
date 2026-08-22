@@ -4,12 +4,14 @@ import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.scutmmq.entity.ReturnAudit;
 import com.scutmmq.vo.AuditVO;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Param;
 
 import java.util.List;
 
 @Mapper
 public interface ReturnAuditMapper extends BaseMapper<ReturnAudit> {
-    List<AuditVO> getAudits(Long userId, Long auditStatus);
+    // C9: 多参数 mapper 必须显式 @Param
+    List<AuditVO> getAudits(@Param("userId") Long userId, @Param("auditStatus") Long auditStatus);
 
-    List<AuditVO> getMerchantAudits(Long merchantId, Long auditStatus);
+    List<AuditVO> getMerchantAudits(@Param("merchantId") Long merchantId, @Param("auditStatus") Long auditStatus);
 }
