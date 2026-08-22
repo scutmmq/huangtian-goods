@@ -3,11 +3,7 @@ package com.scutmmq.ai.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scutmmq.ai.capability.CapabilityRegistry;
-import com.scutmmq.ai.capability.RunContext;
-import com.scutmmq.ai.capability.RunResult;
-import com.scutmmq.ai.capability.ToolContext;
 import com.scutmmq.ai.client.AiChatClient;
-import com.scutmmq.ai.client.StreamChunkListener;
 import com.scutmmq.ai.client.ToolCallDelta;
 import com.scutmmq.ai.config.AiAssistantProperties;
 import com.scutmmq.ai.security.ToolAccessDeniedException;
@@ -18,19 +14,15 @@ import com.scutmmq.ai.tool.AgentToolCall;
 import com.scutmmq.ai.tool.AgentToolDefinition;
 import com.scutmmq.ai.tool.AgentToolResult;
 import com.scutmmq.ai.tool.MallAgentTool;
-import com.scutmmq.ai.tool.UserRole;
-import com.scutmmq.ai.util.DsmlSanitizer;
 import com.scutmmq.ai.util.MallUserContextExecutor;
 import com.scutmmq.dto.UserDTO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 负责一次完整的 AI 对话：装配系统提示词 + 历史 + 工具定义；
@@ -299,12 +291,6 @@ public class AgentOrchestrator {
         return STATIC_ACCUMULATOR.appendChunk(current, delta);
     }
 
-    private static String preview(String s, int max) {
-        if (s == null) return "";
-        String t = s.replace("\n", " ").replace("\r", " ");
-        return t.length() <= max ? t : t.substring(0, max) + "...";
-    }
-
     /**
      * C8:计算工具调用签名,用于检测重复。
      * 同一 (name, args 序列化) 在一次 Run 内重复出现即视为死循环信号。
@@ -326,6 +312,12 @@ public class AgentOrchestrator {
     @Deprecated
     static String buildDuplicateSentinel(String name, int count) {
         return STATIC_ACCUMULATOR.buildDuplicateSentinel(name, count);
+    }
+
+    private static String preview(String s, int max) {
+        if (s == null) return "";
+        String t = s.replace("\n", " ").replace("\r", " ");
+        return t.length() <= max ? t : t.substring(0, max) + "...";
     }
 
     public record HistoryMessage(String role, String content) {
