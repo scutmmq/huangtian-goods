@@ -42,6 +42,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Service
 public class AgentOrchestrator {
 
+    private static final ObjectMapper STATIC_MAPPER = new ObjectMapper();
+
     private final AiChatClient aiChatClient;
     private final MallSkillRegistry skillRegistry;
     private final MallSystemPromptProvider promptProvider;
@@ -570,33 +572,41 @@ public class AgentOrchestrator {
         return node;
     }
 
-    private JsonNode appendArguments(JsonNode current, String delta) {
+    /**
+     * C10 修复:DeepSeek 流式 tool_call arguments 按字符拆 chunk 发送
+     * (先 `{`, 再 `"keyword`, 再 `":"自行车",`, 再 `}` 等),
+     * 旧逻辑在 current 是空 `{}` 时把 current.toString() (即 "{}") 和 delta 拼接,
+     * 产生 "{}{...}" 这种永远不合法的字符串,args 永远停在 __streaming__ 阶段,
+     * 工具收到 keyword=null / productId=null → 全表前 5 / "缺少必填参数"。
+     *
+     * <p>修法:统一从 current 抽取原始字符串 + 拼接 delta + 整体 parse。
+     * current 是空 {} 也视为无 raw,只取 delta。
+     */
+    static JsonNode appendArguments(JsonNode current, String delta) {
         if (delta == null || delta.isEmpty()) return current;
+
+        // 把 current 还原为 raw 字符串
+        String prev = "";
+        if (current != null && current.isObject() && current.has("__streaming__")) {
+            prev = current.get("__streaming__").asText("");
+        } else if (current != null && current.isObject() && current.size() == 0) {
+            // 空 {} → 当作 null 处理,否则 "{}"+delta 会变成 "{}{...}" 永远不合 JSON
+            prev = "";
+        } else if (current != null) {
+            prev = current.toString();
+        }
+
+        String merged = prev + delta;
         try {
-            if (current != null && current.isObject() && current.has("__streaming__")) {
-                String prev = current.get("__streaming__").asText("");
-                String merged = prev + delta;
-                JsonNode n = objectMapper.readTree(merged);
-                if (n != null) {
-                    return n;
-                }
-                ObjectNode node = objectMapper.createObjectNode();
-                node.put("__streaming__", merged);
-                return node;
-            }
-            if (current != null && current.isObject() && current.size() > 0) {
-                // current 已经是完整 JSON —— 合并进来再 parse 一次
-                String existing = current.toString();
-                JsonNode n = objectMapper.readTree(existing + delta);
-                if (n != null) {
-                    return n;
-                }
+            JsonNode n = STATIC_MAPPER.readTree(merged);
+            if (n != null) {
+                return n;  // 凑齐了,返回 parsed JSON
             }
         } catch (Exception ignored) {
-            // 还没凑齐 JSON
+            // 还在累积
         }
-        ObjectNode node = objectMapper.createObjectNode();
-        node.put("__streaming__", (current == null ? "" : current.toString()) + delta);
+        ObjectNode node = STATIC_MAPPER.createObjectNode();
+        node.put("__streaming__", merged);
         return node;
     }
 
