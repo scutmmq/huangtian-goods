@@ -3,16 +3,23 @@ package com.scutmmq.ai.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.scutmmq.ai.capability.CapabilityRegistry;
+import com.scutmmq.ai.capability.RunContext;
+import com.scutmmq.ai.capability.RunResult;
+import com.scutmmq.ai.capability.ToolContext;
 import com.scutmmq.ai.client.AiChatClient;
 import com.scutmmq.ai.client.StreamChunkListener;
 import com.scutmmq.ai.client.ToolCallDelta;
 import com.scutmmq.ai.config.AiAssistantProperties;
+import com.scutmmq.ai.security.ToolAccessDeniedException;
+import com.scutmmq.ai.security.ToolSecurityInterceptor;
 import com.scutmmq.ai.skill.MallSkillRegistry;
 import com.scutmmq.ai.skill.MallSystemPromptProvider;
 import com.scutmmq.ai.tool.AgentToolCall;
 import com.scutmmq.ai.tool.AgentToolDefinition;
 import com.scutmmq.ai.tool.AgentToolResult;
 import com.scutmmq.ai.tool.MallAgentTool;
+import com.scutmmq.ai.tool.UserRole;
 import com.scutmmq.ai.util.MallUserContextExecutor;
 import com.scutmmq.dto.UserDTO;
 import lombok.extern.slf4j.Slf4j;
@@ -38,17 +45,23 @@ public class AgentOrchestrator {
     private final MallSystemPromptProvider promptProvider;
     private final AiAssistantProperties assistantProperties;
     private final ObjectMapper objectMapper;
+    private final CapabilityRegistry capabilityRegistry;
+    private final ToolSecurityInterceptor toolSecurityInterceptor;
 
     public AgentOrchestrator(AiChatClient aiChatClient,
                              MallSkillRegistry skillRegistry,
                              MallSystemPromptProvider promptProvider,
                              AiAssistantProperties assistantProperties,
-                             ObjectMapper objectMapper) {
+                             ObjectMapper objectMapper,
+                             CapabilityRegistry capabilityRegistry,
+                             ToolSecurityInterceptor toolSecurityInterceptor) {
         this.aiChatClient = aiChatClient;
         this.skillRegistry = skillRegistry;
         this.promptProvider = promptProvider;
         this.assistantProperties = assistantProperties;
         this.objectMapper = objectMapper;
+        this.capabilityRegistry = capabilityRegistry;
+        this.toolSecurityInterceptor = toolSecurityInterceptor;
     }
 
     /**
@@ -178,6 +191,21 @@ public class AgentOrchestrator {
                                     List<HistoryMessage> history,
                                     String userMessage,
                                     OrchestratorListener listener) {
+        // 不携带 runId/sessionId 的旧入口,委托给新方法,事件用替代 ID 关联。
+        // AiAssistantService 已切到 runStreamingWithRun(...),这里仅作向下兼容。
+        return runStreamingWithRun(currentUser, history, userMessage, listener, null, null);
+    }
+
+    /**
+     * 带 runId / sessionId 的流式运行入口。AiAssistantService 走这里,
+     * 让 CapabilityRegistry 发布的事件能精确关联到 ai_run / ai_session 表。
+     */
+    public AgentResult runStreamingWithRun(UserDTO currentUser,
+                                           List<HistoryMessage> history,
+                                           String userMessage,
+                                           OrchestratorListener listener,
+                                           String runId,
+                                           String sessionId) {
         List<Map<String, Object>> messages = new ArrayList<>();
         messages.add(Map.of("role", "system", "content", promptProvider.buildSystemPrompt(currentUser)));
         for (HistoryMessage msg : history) {
@@ -191,12 +219,31 @@ public class AgentOrchestrator {
         final String[] replyRef = {""};
 
         int maxIter = Math.max(1, assistantProperties.getMaxToolIterations());
+        final long runStartMs = System.currentTimeMillis();
+        final long ttftMsHolder[] = {-1L};
         log.info("[AI][ORCH][STREAM] runStreaming() begin user={} historyCount={} tools={} maxIter={} userMsg=\"{}\"",
                 currentUser == null ? null : currentUser.getId(),
                 history.size(),
                 tools.size(),
                 maxIter,
                 preview(userMessage, 120));
+
+        // B2:发布 RunStartedEvent,让可观测 capability 开始计时/计数
+        RunContext runCtx = RunContext.of(
+                runId == null ? "local-" + runStartMs : runId,
+                sessionId,
+                currentUser == null ? null : currentUser.getId(),
+                currentUser == null || currentUser.getRole() == null ? UserRole.USER.name() : currentUser.getRole());
+        capabilityRegistry.publishRunStarted(runCtx);
+        RunResult runResult = RunResult.builder()
+                .context(runCtx)
+                .replyPreview("")
+                .hasDraft(false)
+                .toolExecutionCount(0)
+                .totalMs(0L)
+                .ttftMs(0L)
+                .terminal(false)
+                .build();
 
         boolean stillWantsTools = false;
         try {
@@ -217,6 +264,9 @@ public class AgentOrchestrator {
                         if (delta == null || delta.isEmpty()) return;
                         replyBuilder.append(delta);
                         safeOnAssistantDelta(listener, delta, replyBuilder.length() - delta.length());
+                        if (ttftMsHolder[0] < 0) {
+                            ttftMsHolder[0] = System.currentTimeMillis() - runStartMs;
+                        }
                     }
 
                     @Override
@@ -276,6 +326,7 @@ public class AgentOrchestrator {
                             call.getName(), call.getId(), call.getArguments());
                     safeOnToolStarted(listener, call.getId(), call.getName(), call.getArguments());
 
+                    long toolStartMs = System.currentTimeMillis();
                     MallAgentTool tool = skillRegistry.findByName(call.getName());
                     AgentToolResult toolResult;
                     if (tool == null) {
@@ -296,7 +347,23 @@ public class AgentOrchestrator {
                     if (toolResult.getDraft() != null) {
                         draft = toolResult.getDraft();
                         safeOnDraftCreated(listener, draft);
+                        capabilityRegistry.publishDraftCreated(
+                                runCtx.getRunId(), runCtx.getSessionId(), runCtx.getUserId(),
+                                draft.getActionType(), draft.getTitle(), draft.getSummary(),
+                                draft.getPayload());
                     }
+
+                    // B2:每个工具执行完发布 ToolExecutedEvent,observability 用
+                    boolean toolSuccess = tool != null && toolResult.getDraft() == null
+                            || (toolResult != null && toolResult.getContent() != null
+                                    && !toolResult.getContent().startsWith("工具执行失败"));
+                    capabilityRegistry.publishToolExecuted(
+                            ToolContext.fromRun(runCtx, call.getName(), call.getId(),
+                                    call.getArguments(),
+                                    toolResult == null ? "" : safeTruncate(toolResult.getContent(), 200),
+                                    toolResult != null && toolResult.getDraft() != null,
+                                    toolSuccess, null,
+                                    toolStartMs, System.currentTimeMillis()));
                     safeOnToolFinished(listener, call.getId(), call.getName(), toolResult.getContent(),
                             toolResult.getDraft() != null);
 
@@ -353,16 +420,30 @@ public class AgentOrchestrator {
                 }
             }
 
-            log.info("[AI][ORCH][STREAM] runStreaming() done. toolExecutions={} draft={} finalReplyLen={}",
+            long totalMs = System.currentTimeMillis() - runStartMs;
+            log.info("[AI][ORCH][STREAM] runStreaming() done. toolExecutions={} draft={} finalReplyLen={} totalMs={}",
                     executions.size(),
                     draft == null ? "none" : draft.getActionType(),
-                    replyRef[0].length());
+                    replyRef[0].length(),
+                    totalMs);
             safeOnRunCompleted(listener, replyRef[0], draft);
+
+            // B2:填充 RunResult 并 publish RunCompletedEvent
+            runResult.setReplyPreview(safeTruncate(replyRef[0], 200));
+            runResult.setHasDraft(draft != null);
+            runResult.setToolExecutionCount(executions.size());
+            runResult.setTotalMs(totalMs);
+            runResult.setTtftMs(ttftMsHolder[0] < 0 ? totalMs : ttftMsHolder[0]);
+            capabilityRegistry.publishRunCompleted(runResult);
             return new AgentResult(replyRef[0], draft, executions);
 
         } catch (Exception e) {
             log.error("[AI][ORCH][STREAM] runStreaming failed: {}", e.getMessage(), e);
             safeOnRunFailed(listener, e);
+            // 失败也 publish,RunResult.terminal 保证只发一次
+            runResult.setReplyPreview("failed");
+            runResult.setTotalMs(System.currentTimeMillis() - runStartMs);
+            capabilityRegistry.publishRunCompleted(runResult);
             return new AgentResult(
                     replyRef[0] == null || replyRef[0].isEmpty()
                             ? "抱歉，AI 这次没给到回复。" : replyRef[0],
@@ -528,7 +609,15 @@ public class AgentOrchestrator {
 
     private AgentToolResult safeExecute(MallAgentTool tool, JsonNode arguments, UserDTO currentUser) {
         try {
+            // B2:工具执行前先做角色权限校验,ToolSecurityInterceptor.preCheck 抛异常即视为拒绝
+            toolSecurityInterceptor.preCheck(tool.name());
             return MallUserContextExecutor.runAs(currentUser, () -> tool.execute(arguments));
+        } catch (ToolAccessDeniedException e) {
+            log.info("[AI][ORCH] tool denied: {} - user={} role={}",
+                    tool.name(),
+                    currentUser == null ? null : currentUser.getId(),
+                    e.getUserRole());
+            return AgentToolResult.ofText("工具 " + tool.name() + " 当前无权限调用（角色=" + e.getUserRole() + "）。");
         } catch (Exception e) {
             log.warn("[AI][ORCH] tool {} execution failed: {}", tool.name(), e.getMessage(), e);
             return AgentToolResult.ofText("工具执行失败: " + e.getMessage());
@@ -539,6 +628,11 @@ public class AgentOrchestrator {
         if (s == null) return "";
         String t = s.replace("\n", " ").replace("\r", " ");
         return t.length() <= max ? t : t.substring(0, max) + "...";
+    }
+
+    private static String safeTruncate(String s, int max) {
+        if (s == null) return "";
+        return s.length() <= max ? s : s.substring(0, max) + "...";
     }
 
     private Map<String, Object> buildAssistantToolCallMessage(String content,

@@ -226,7 +226,9 @@ public class AiAssistantService {
                     long t0 = System.currentTimeMillis();
                     AgentOrchestrator.AgentResult result;
                     try {
-                        result = agentOrchestrator.runStreaming(user, history, userMessage, listener);
+                        // B2:带 runId/sessionId 的入口,让 CapabilityRegistry 发布的事件能精确关联到 ai_run 表
+                        result = agentOrchestrator.runStreamingWithRun(user, history, userMessage,
+                                listener, runId, sessionId);
                     } catch (Exception e) {
                         // runStreaming 自身异常路径里已经回调过 listener.onRunFailed()；
                         // 这里再保险一次——避免 orchestrator 抛 exception 在 listener 正常路径之外。

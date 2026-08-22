@@ -18,13 +18,13 @@ import lombok.AllArgsConstructor;
 @AllArgsConstructor
 public class RunResult {
 
-    private final RunContext context;
+    private RunContext context;
 
-    private final String replyPreview;
-    private final boolean hasDraft;
-    private final int toolExecutionCount;
-    private final long totalMs;
-    private final long ttftMs;
+    private String replyPreview;
+    private boolean hasDraft;
+    private int toolExecutionCount;
+    private long totalMs;
+    private long ttftMs;
 
     private Integer promptTokens;
     private Integer completionTokens;
