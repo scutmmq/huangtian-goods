@@ -1,0 +1,7 @@
+name: search-shoes
+message: "我要买运动鞋"
+expectTool: search_products
+expectKeywords:
+  - "鞋"
+  - "商品"
+userId: 1001

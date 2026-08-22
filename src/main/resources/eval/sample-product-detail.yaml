@@ -1,0 +1,7 @@
+name: product-detail
+message: "帮我看看商品 1 的详情"
+expectTool: get_product_detail
+expectKeywords:
+  - "商品"
+  - "详情"
+userId: 1001

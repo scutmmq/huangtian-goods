@@ -1,0 +1,8 @@
+name: search-fruit
+message: "推荐点水果"
+expectTool: search_products
+expectKeywords:
+  - "水果"
+  - "苹果"
+  - "无匹配"
+userId: 1001

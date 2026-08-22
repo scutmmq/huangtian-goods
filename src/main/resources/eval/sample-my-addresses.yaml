@@ -1,0 +1,7 @@
+name: my-addresses
+message: "我有哪些收货地址?"
+expectTool: get_my_addresses
+expectKeywords:
+  - "地址"
+  - "收货"
+userId: 1001

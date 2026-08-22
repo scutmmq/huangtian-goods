@@ -1,0 +1,10 @@
+name: thanks-pure-chat
+message: "谢谢你"
+expectNoTools: true
+expectKeywords:
+  - "不客气"
+  - "随时"
+  - "帮助"
+  - "客气"
+  - "乐意"
+userId: 1001
