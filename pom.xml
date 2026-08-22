@@ -95,6 +95,12 @@
             <version>0.13.0</version>
         </dependency>
 
+        <!-- YAML 解析,用于 B2 Stage 1 评估用例 -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.dataformat</groupId>
+            <artifactId>jackson-dataformat-yaml</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>com.github.pagehelper</groupId>
             <artifactId>pagehelper-spring-boot-starter</artifactId>

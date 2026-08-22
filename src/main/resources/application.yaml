@@ -31,3 +31,12 @@ ai:
   assistant:
     max-history-messages: 20
     draft-expire-minutes: 15
+  # B2:AI 助手能力开关。默认全部禁用,改 yaml 启用。
+  # 见 strategy 文档 §B2 Checkpoint 3。
+  capability:
+    flags:
+      observability: false    # 启用后:Run 用量落 ai_run_usage + 延迟日志
+      eval: false             # 启用后:启用 EvalRunner(/dev/ai/eval/run)
+  observability:
+    cost-per-1k-prompt-tokens: 0
+    cost-per-1k-completion-tokens: 0

@@ -1,0 +1,9 @@
+name: search-empty
+message: "我要买外星飞船"
+expectTool: search_products
+expectKeywords:
+  - "没找到"
+  - "无匹配"
+  - "暂时"
+  - "不好意思"
+userId: 1001

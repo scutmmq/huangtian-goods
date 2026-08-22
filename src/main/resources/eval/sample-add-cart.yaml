@@ -1,0 +1,7 @@
+name: draft-add-cart
+message: "把商品 2 加 3 个到购物车"
+expectTool: draft_add_cart_item
+expectKeywords:
+  - "购物车"
+  - "确认"
+userId: 1001
