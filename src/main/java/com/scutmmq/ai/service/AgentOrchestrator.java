@@ -72,6 +72,11 @@ public class AgentOrchestrator {
      */
     private final ToolExecutionDispatcher toolDispatcher;
 
+    /**
+     * 2026-08-23 阶段 2 抽出:344 行流式主循环。
+     */
+    private final StreamingOrchestrator streamingOrchestrator;
+
     public AgentOrchestrator(AiChatClient aiChatClient,
                              MallSkillRegistry skillRegistry,
                              MallSystemPromptProvider promptProvider,
@@ -91,6 +96,9 @@ public class AgentOrchestrator {
         this.messageBuilder = new ModelMessageBuilder(objectMapper);
         this.toolDispatcher = new ToolExecutionDispatcher(
                 skillRegistry, toolSecurityInterceptor, capabilityRegistry, toolCallAccumulator);
+        this.streamingOrchestrator = new StreamingOrchestrator(
+                aiChatClient, skillRegistry, promptProvider, assistantProperties,
+                capabilityRegistry, toolCallAccumulator, messageBuilder, toolDispatcher);
     }
 
     /**
@@ -242,6 +250,9 @@ public class AgentOrchestrator {
     /**
      * 带 runId / sessionId 的流式运行入口。AiAssistantService 走这里,
      * 让 CapabilityRegistry 发布的事件能精确关联到 ai_run / ai_session 表。
+     *
+     * <p>2026-08-23 阶段 2 重构:344 行主循环全权委托给 {@link StreamingOrchestrator},
+     * AgentOrchestrator 只剩装配 + 入口转发。
      */
     public AgentResult runStreamingWithRun(UserDTO currentUser,
                                            List<HistoryMessage> history,
@@ -249,239 +260,7 @@ public class AgentOrchestrator {
                                            OrchestratorListener listener,
                                            String runId,
                                            String sessionId) {
-        List<Map<String, Object>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", promptProvider.buildSystemPrompt(currentUser)));
-        for (HistoryMessage msg : history) {
-            messages.add(Map.of("role", msg.role(), "content", msg.content() == null ? "" : msg.content()));
-        }
-        messages.add(Map.of("role", "user", "content", userMessage == null ? "" : userMessage));
-
-        List<AgentToolDefinition> tools = skillRegistry.listDefinitions();
-        List<ToolExecutionRecord> executions = new ArrayList<>();
-        AgentToolResult.DraftPayload draft = null;
-        final String[] replyRef = {""};
-
-        int maxIter = Math.max(1, assistantProperties.getMaxToolIterations());
-        final long runStartMs = System.currentTimeMillis();
-        final long ttftMsHolder[] = {-1L};
-        log.info("[AI][ORCH][STREAM] runStreaming() begin user={} historyCount={} tools={} maxIter={} userMsg=\"{}\"",
-                currentUser == null ? null : currentUser.getId(),
-                history.size(),
-                tools.size(),
-                maxIter,
-                preview(userMessage, 120));
-
-        // B2:发布 RunStartedEvent,让可观测 capability 开始计时/计数
-        RunContext runCtx = RunContext.of(
-                runId == null ? "local-" + runStartMs : runId,
-                sessionId,
-                currentUser == null ? null : currentUser.getId(),
-                currentUser == null || currentUser.getRole() == null ? UserRole.USER.name() : currentUser.getRole());
-        capabilityRegistry.publishRunStarted(runCtx);
-        RunResult runResult = RunResult.builder()
-                .context(runCtx)
-                .replyPreview("")
-                .hasDraft(false)
-                .toolExecutionCount(0)
-                .totalMs(0L)
-                .ttftMs(0L)
-                .terminal(false)
-                .build();
-
-        boolean stillWantsTools = false;
-        // C8 重复死循环检测已搬到 ToolExecutionDispatcher.dispatch()
-        try {
-            for (int iter = 0; iter < maxIter; iter++) {
-                log.info("[AI][ORCH][STREAM] ---- iteration {}/{} : sending {} messages to model ----",
-                        iter + 1, maxIter, messages.size());
-                long t0 = System.currentTimeMillis();
-
-                // 每个迭代各自累积
-                StringBuilder replyBuilder = new StringBuilder();
-                StringBuilder reasoningBuilder = new StringBuilder();
-                List<AgentToolCall> toolCalls = new ArrayList<>();
-                AtomicBoolean streamFailed = new AtomicBoolean(false);
-
-                aiChatClient.streamChatCompletion(messages, tools, new StreamChunkListener() {
-                    @Override
-                    public void onContentDelta(String delta) {
-                        if (delta == null || delta.isEmpty()) return;
-                        // C6 修复:在源头(satisfies-onContentDelta)就剔除 DSML,
-                        // 让 replyBuilder、safeOnAssistantDelta listener、
-                        // 后续 finalReply 全部拿干净文本。
-                        // 这覆盖 C2/C4 漏掉的"原始 token 在 orchestrator 内层留存"路径。
-                        String clean = DsmlSanitizer.strip(delta);
-                        if (clean.isEmpty()) {
-                            // 整片 delta 是 DSML 块,不进 replyBuilder 也不广播 SSE 空文本,
-                            // 但仍推进 llm 输出累计长度占位,避免 SSE 客户端 offset 卡顿。
-                            safeOnAssistantDelta(listener, "", replyBuilder.length());
-                            return;
-                        }
-                        replyBuilder.append(clean);
-                        safeOnAssistantDelta(listener, clean, replyBuilder.length() - clean.length());
-                        if (ttftMsHolder[0] < 0) {
-                            ttftMsHolder[0] = System.currentTimeMillis() - runStartMs;
-                        }
-                    }
-
-                    @Override
-                    public void onReasoningDelta(String delta) {
-                        if (delta == null || delta.isEmpty()) return;
-                        reasoningBuilder.append(delta);
-                    }
-
-                    @Override
-                    public void onToolCallDelta(List<ToolCallDelta> deltas) {
-                        if (deltas == null || deltas.isEmpty()) return;
-                        // 2026-08-23 重构:tool call 累积逻辑搬到 ToolCallAccumulator
-                        for (ToolCallDelta d : deltas) {
-                            toolCallAccumulator.mergeDelta(toolCalls, d);
-                        }
-                    }
-
-                    @Override
-                    public void onComplete() {
-                        // no-op: 由外层循环统一处理
-                    }
-
-                    @Override
-                    public void onError(Throwable error) {
-                        streamFailed.set(true);
-                        // 不直接回调 onRunFailed，留给外层统一处理（保持位置清晰）
-                        log.warn("[AI][ORCH][STREAM] stream reported error: {}", error.getMessage());
-                    }
-                });
-
-                if (streamFailed.get()) {
-                    throw new RuntimeException("AI stream failed (see previous log)");
-                }
-
-                String reply = replyBuilder.toString();
-                String reasoning = reasoningBuilder.toString();
-                log.info("[AI][ORCH][STREAM] model iteration done in {}ms: contentLen={} toolCalls={} hasReasoning={}",
-                        System.currentTimeMillis() - t0,
-                        reply.length(),
-                        toolCalls.size(),
-                        !reasoning.isEmpty());
-
-                if (toolCalls.isEmpty()) {
-                    log.info("[AI][ORCH][STREAM] no tool_calls -> final answer. preview=\"{}\"",
-                            preview(reply, 200));
-                    replyRef[0] = reply;
-                    stillWantsTools = false;
-                    break;
-                }
-
-                // 追加 assistant 消息（带 tool_calls + reasoning_content）
-                // 2026-08-23 重构:走 ModelMessageBuilder(OpenAI 协议字段集中处)
-                messages.add(messageBuilder.buildAssistantToolCallMessage(reply, toolCalls,
-                        reasoning.isEmpty() ? null : reasoning));
-
-                // C11 安全网:过滤空 name/id 的 phantom tool calls。
-                // 2026-08-23 重构:逻辑搬到了 ToolExecutionDispatcher.filterPhantoms。
-                toolDispatcher.filterPhantoms(toolCalls);
-
-                // 2026-08-23 重构:工具执行循环全权委托给 ToolExecutionDispatcher,
-                // 包含 C8 重复拦截 + capability 事件 + listener 回调 + 权限 + UserHolder 注入。
-                ToolExecutionDispatcher.ExecutionResult dispatchResult =
-                        toolDispatcher.dispatch(toolCalls, listener, currentUser, runCtx);
-
-                // 收集执行记录 + 喂回模型
-                for (ToolExecutionDispatcher.ExecutionRecord er : dispatchResult.records()) {
-                    executions.add(new ToolExecutionRecord(
-                            er.call().getName(), er.call().getArguments(), er.result().getContent()));
-                    messages.add(messageBuilder.buildToolResponseMessage(
-                            er.call().getId(), er.call().getName(), er.result().getContent()));
-                }
-                if (dispatchResult.draft() != null) {
-                    draft = dispatchResult.draft();
-                }
-
-                stillWantsTools = (iter == maxIter - 1);
-            }
-
-            // 兜底：循环到上限还在要工具时强制一次不带 tools 的流式取最终文本
-            if (stillWantsTools) {
-                log.warn("[AI][ORCH][STREAM] reached maxIter={} with pending tool flow, forcing final text answer", maxIter);
-                StringBuilder forcedReply = new StringBuilder();
-                AtomicBoolean forcedFailed = new AtomicBoolean(false);
-                try {
-                    aiChatClient.streamChatCompletion(messages, List.of(), new StreamChunkListener() {
-                        @Override
-                        public void onContentDelta(String delta) {
-                            if (delta == null || delta.isEmpty()) return;
-                            // C6:强制收尾阶段的输出也走同一 sanitize,避免 fallback reply 漏 DSML
-                            String clean = DsmlSanitizer.strip(delta);
-                            if (clean.isEmpty()) {
-                                safeOnAssistantDelta(listener, "", forcedReply.length());
-                                return;
-                            }
-                            forcedReply.append(clean);
-                            safeOnAssistantDelta(listener, clean, forcedReply.length() - clean.length());
-                        }
-
-                        @Override
-                        public void onReasoningDelta(String delta) {
-                            // 强制收敛过程不外送 reasoning
-                        }
-
-                        @Override
-                        public void onToolCallDelta(List<ToolCallDelta> deltas) {
-                            // 强制收敛不允许再调用工具
-                        }
-
-                        @Override
-                        public void onComplete() {
-                        }
-
-                        @Override
-                        public void onError(Throwable error) {
-                            forcedFailed.set(true);
-                        }
-                    });
-                    if (!forcedFailed.get()) {
-                        String forced = forcedReply.toString();
-                        if (!forced.isEmpty()) {
-                            replyRef[0] = forced;
-                        }
-                    }
-                } catch (Exception e) {
-                    log.error("[AI][ORCH][STREAM] forced final call failed: {}", e.getMessage(), e);
-                }
-                if (replyRef[0].isEmpty()) {
-                    replyRef[0] = "我这边查了几轮还没能整理出一个完整答案。要不你换一种方式描述一下需求？";
-                }
-            }
-
-            long totalMs = System.currentTimeMillis() - runStartMs;
-            log.info("[AI][ORCH][STREAM] runStreaming() done. toolExecutions={} draft={} finalReplyLen={} totalMs={}",
-                    executions.size(),
-                    draft == null ? "none" : draft.getActionType(),
-                    replyRef[0].length(),
-                    totalMs);
-            safeOnRunCompleted(listener, replyRef[0], draft);
-
-            // B2:填充 RunResult 并 publish RunCompletedEvent
-            runResult.setReplyPreview(safeTruncate(replyRef[0], 200));
-            runResult.setHasDraft(draft != null);
-            runResult.setToolExecutionCount(executions.size());
-            runResult.setTotalMs(totalMs);
-            runResult.setTtftMs(ttftMsHolder[0] < 0 ? totalMs : ttftMsHolder[0]);
-            capabilityRegistry.publishRunCompleted(runResult);
-            return new AgentResult(replyRef[0], draft, executions);
-
-        } catch (Exception e) {
-            log.error("[AI][ORCH][STREAM] runStreaming failed: {}", e.getMessage(), e);
-            safeOnRunFailed(listener, e);
-            // 失败也 publish,RunResult.terminal 保证只发一次
-            runResult.setReplyPreview("failed");
-            runResult.setTotalMs(System.currentTimeMillis() - runStartMs);
-            capabilityRegistry.publishRunCompleted(runResult);
-            return new AgentResult(
-                    replyRef[0] == null || replyRef[0].isEmpty()
-                            ? "抱歉，AI 这次没给到回复。" : replyRef[0],
-                    draft, executions);
-        }
+        return streamingOrchestrator.runStreaming(currentUser, history, userMessage, listener, runId, sessionId);
     }
 
     /**
@@ -520,39 +299,10 @@ public class AgentOrchestrator {
         return STATIC_ACCUMULATOR.appendChunk(current, delta);
     }
 
-    private void safeOnAssistantDelta(OrchestratorListener listener, String delta, int offset) {
-        try {
-            listener.onAssistantDelta(delta, offset);
-        } catch (Exception e) {
-            log.warn("[AI][ORCH][STREAM] listener.onAssistantDelta threw: {}", e.getMessage(), e);
-        }
-    }
-
-    private void safeOnRunCompleted(OrchestratorListener listener, String reply, AgentToolResult.DraftPayload draft) {
-        try {
-            listener.onRunCompleted(reply, draft);
-        } catch (Exception e) {
-            log.warn("[AI][ORCH][STREAM] listener.onRunCompleted threw: {}", e.getMessage(), e);
-        }
-    }
-
-    private void safeOnRunFailed(OrchestratorListener listener, Throwable err) {
-        try {
-            listener.onRunFailed(err);
-        } catch (Exception e) {
-            log.warn("[AI][ORCH][STREAM] listener.onRunFailed threw: {}", e.getMessage(), e);
-        }
-    }
-
     private static String preview(String s, int max) {
         if (s == null) return "";
         String t = s.replace("\n", " ").replace("\r", " ");
         return t.length() <= max ? t : t.substring(0, max) + "...";
-    }
-
-    private static String safeTruncate(String s, int max) {
-        if (s == null) return "";
-        return s.length() <= max ? s : s.substring(0, max) + "...";
     }
 
     /**
