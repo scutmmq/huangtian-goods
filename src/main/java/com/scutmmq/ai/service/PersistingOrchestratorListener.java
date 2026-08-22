@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.scutmmq.ai.entity.AiMessage;
 import com.scutmmq.ai.tool.AgentToolResult;
+import com.scutmmq.ai.util.DsmlSanitizer;
 import lombok.extern.slf4j.Slf4j;
 
 import java.time.LocalDateTime;
@@ -91,7 +92,14 @@ public class PersistingOrchestratorListener implements OrchestratorListener {
         payload.put("offset", offset);
         appendEvent(AiStreamEventService.TYPE_ASSISTANT_DELTA, payload);
 
-        contentBuilder.append(delta);
+        // C2 hotfix:过滤掉 DSML 工具调用标签,避免原始 token 累积到 ai_message.content。
+        // 注意:SSE event(payload.delta)这里保留 raw,前端可以做不同渲染;
+        // 落库入 ai_message.content 走过滤后的内容。
+        String cleanDelta = DsmlSanitizer.strip(delta);
+        if (cleanDelta.isEmpty()) {
+            return; // 整片都在 DSML 标签里,不写到 contentBuilder,前端也不重复空内容
+        }
+        contentBuilder.append(cleanDelta);
         AiMessage msg = new AiMessage();
         msg.setId(assistantMessageId);
         msg.setContent(contentBuilder.toString());
@@ -148,6 +156,8 @@ public class PersistingOrchestratorListener implements OrchestratorListener {
 
         // 信任 orchestrator 给的完整 reply；如果 reply 为空就退回到累加的 contentBuilder。
         String finalContent = reply != null ? reply : contentBuilder.toString();
+        // C2 hotfix:写入 DB 前过滤 DSML 标签。
+        finalContent = DsmlSanitizer.strip(finalContent);
         // 防御：把累加值刷回 contentBuilder，避免后续 read getFinalContent 时拿到陈旧值。
         contentBuilder.setLength(0);
         contentBuilder.append(finalContent);
@@ -174,6 +184,8 @@ public class PersistingOrchestratorListener implements OrchestratorListener {
         this.failureReason = reason;
 
         String finalContent = "[生成失败] " + reason + "\n\n" + contentBuilder.toString();
+        // C2 hotfix:失败消息也过滤 DSML,不让原始 token 漏出来。
+        finalContent = DsmlSanitizer.strip(finalContent);
         AiMessage msg = new AiMessage();
         msg.setId(assistantMessageId);
         msg.setContent(finalContent);
