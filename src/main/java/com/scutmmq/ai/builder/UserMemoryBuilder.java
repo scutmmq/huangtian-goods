@@ -2,7 +2,6 @@ package com.scutmmq.ai.builder;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.scutmmq.ai.config.AiMemoryProperties;
 import com.scutmmq.ai.mapper.UserMemoryMapper;
 import com.scutmmq.ai.security.PromptSanitizer;
 import com.scutmmq.ai.security.PromptSanitizer.FieldType;
@@ -22,7 +21,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.Period;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -44,12 +42,12 @@ import static com.scutmmq.ai.builder.UserMemorySql.USER_MERCHANT;
  *
  * <p>职责:
  * <ul>
- *   <li>computeIdentity — 查 user / user_address / merchant → identityJson</li>
+ *   <li>computeIdentity — 查 user / user_address / merchant → identityJson,
+ *       捕获 chk_identity_size 做 JSON OVERFLOW 降级</li>
  *   <li>computePreference — 跑 7 条聚合 SQL(与 mapper.xml + UserMemorySql 同步)→ preferenceJson,
  *       捕获 chk_preference_size 做 JSON OVERFLOW 降级</li>
  *   <li>renderForPrompt — 反序列化 preferenceJson + 拼接 markdown 段,
- *       按 token 阈值(>600→丢 topMerchants,>500→丢 preferredSizes,>400→丢 activeHours)截断,
- *       每个 user-derived 字段经 PromptSanitizer 三层防御</li>
+ *       按 token 阈值截断,委托 {@link PromptSectionRenderer} 实现</li>
  * </ul>
  *
  * <p>SQL 走 JdbcTemplate 直接调用(常量见 {@link UserMemorySql}),便于单测 mock;
@@ -107,11 +105,6 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
         }
     }
 
-    // ============================ 截断阈值 ============================
-
-    private static final int DROP_SIZES_THRESHOLD = 500;
-    private static final int DROP_HOURS_THRESHOLD = 400;
-
     // ============================ 依赖 ============================
 
     private final JdbcTemplate jdbc;
@@ -119,8 +112,8 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
     private final UserMemoryMapper mapper;
     private final PromptSanitizer sanitizer;
     private final ObjectMapper json;
-    private final AiMemoryProperties props;
     private final AuditService auditService;
+    private final PromptSectionRenderer renderer;
 
     // ============================ computeIdentity ============================
 
@@ -137,6 +130,9 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
                     identity.put("ageRange", computeAgeRange(user.get("birthday")));
                     identity.put("accountAgeDays", computeAccountAgeDays(user.get("createdAt")));
                 }
+            } catch (DataIntegrityViolationException e) {
+                // chk_identity_size 由外层 catch 统一审计降级,这里直接 rethrow
+                throw e;
             } catch (Exception e) {
                 log.warn("[AI][MEMORY] identity user query failed userId={} reason={}", userId, e.getMessage());
             }
@@ -161,6 +157,18 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
             }
 
             return new UserMemorySnapshot(json.writeValueAsString(identity), null);
+        } catch (com.scutmmq.ai.security.PromptInjectionException e) {
+            throw e;
+        } catch (DataIntegrityViolationException e) {
+            if (e.getMessage() != null && e.getMessage().contains("chk_identity_size")) {
+                log.warn("[AI][MEMORY] identity_json > 8KB userId={}", userId);
+                auditService.logJsonOverflow(userId, "identity");
+                return UserMemorySnapshot.empty();
+            }
+            throw e;
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            log.error("[AI][MEMORY] computeIdentity JSON serialization failed userId={}", userId, e);
+            return UserMemorySnapshot.empty();
         } catch (Exception e) {
             log.error("[AI][MEMORY] computeIdentity failed userId={}", userId, e);
             return UserMemorySnapshot.empty();
@@ -252,90 +260,26 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
             if (pref == null || pref.isEmpty()) return "";
 
             StringBuilder sb = new StringBuilder("【用户画像】\n");
-            appendSection(sb, "## 价格区间\n", pref.get("priceRange"), this::formatPriceRange);
-            appendSection(sb, "## 偏好类目\n", pref.get("topCategories"), v -> formatList((List<?>) v, "categoryName", "spend"));
-            appendSection(sb, "## 偏好商家\n", pref.get("topMerchants"), v -> formatList((List<?>) v, "merchantName", "spend"));
-            appendSection(sb, "## 偏好尺码\n", pref.get("preferredSizes"), v -> formatList((List<?>) v, "categoryName", "size"));
-            appendSection(sb, "## 活跃时段\n", pref.get("activeHours"), v -> String.join(",",
-                    ((List<?>) v).stream().map(String::valueOf).collect(Collectors.toList())));
-            appendSection(sb, "## 退货率\n", pref.get("returnRate"), this::formatReturnRate);
-            appendSection(sb, "## 偏好支付\n", pref.get("paymentMethodPref"), v -> formatList((List<?>) v, "method", "count"));
-            appendSection(sb, "## 偏好配送\n", pref.get("shippingMethodPref"), v -> formatList((List<?>) v, "method", "count"));
+            renderer.appendSection(sb, "## 价格区间\n", pref.get("priceRange"), renderer::formatPriceRange);
+            renderer.appendSection(sb, "## 偏好类目\n", pref.get("topCategories"),
+                    v -> renderer.formatList((List<?>) v, "categoryName", "spend"));
+            renderer.appendSection(sb, "## 偏好商家\n", pref.get("topMerchants"),
+                    v -> renderer.formatList((List<?>) v, "merchantName", "spend"));
+            renderer.appendSection(sb, "## 偏好尺码\n", pref.get("preferredSizes"),
+                    v -> renderer.formatList((List<?>) v, "categoryName", "size"));
+            renderer.appendSection(sb, "## 活跃时段\n", pref.get("activeHours"),
+                    v -> String.join(",", ((List<?>) v).stream().map(String::valueOf).collect(Collectors.toList())));
+            renderer.appendSection(sb, "## 退货率\n", pref.get("returnRate"), renderer::formatReturnRate);
+            renderer.appendSection(sb, "## 偏好支付\n", pref.get("paymentMethodPref"),
+                    v -> renderer.formatList((List<?>) v, "method", "count"));
+            renderer.appendSection(sb, "## 偏好配送\n", pref.get("shippingMethodPref"),
+                    v -> renderer.formatList((List<?>) v, "method", "count"));
 
-            return truncate(sb.toString());
+            return renderer.truncate(sb.toString());
         } catch (Exception e) {
             log.error("[AI][MEMORY] render failed", e);
             return "";
         }
-    }
-
-    // ============================ 渲染段 + 截断 ============================
-
-    private void appendSection(StringBuilder sb, String header, Object value, java.util.function.Function<Object, String> formatter) {
-        if (value == null) return;
-        if (value instanceof List && ((List<?>) value).isEmpty()) return;
-        if (value instanceof Map && ((Map<?, ?>) value).isEmpty()) return;
-        String body = formatter.apply(value);
-        if (body == null || body.isEmpty()) return;
-        sb.append(header).append(body).append('\n');
-    }
-
-    private String formatPriceRange(Object v) {
-        if (!(v instanceof Map)) return "";
-        Map<?, ?> m = (Map<?, ?>) v;
-        return "avg=" + m.get("avg") + ", p50=" + m.get("p50") + ", p25=" + m.get("p25")
-                + ", p75=" + m.get("p75") + ", max=" + m.get("max");
-    }
-
-    private String formatReturnRate(Object v) {
-        if (!(v instanceof Map)) return "";
-        Map<?, ?> m = (Map<?, ?>) v;
-        return "total=" + m.get("total") + ", refunded=" + m.get("refunded") + ", rate=" + m.get("rate");
-    }
-
-    private String formatList(List<?> list, String nameKey, String valueKey) {
-        List<String> parts = new ArrayList<>();
-        for (Object o : list) {
-            if (o instanceof Map) {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> m = (Map<String, Object>) o;
-                parts.add(String.valueOf(m.getOrDefault(nameKey, "")) + "(" + m.getOrDefault(valueKey, "") + ")");
-            }
-        }
-        return String.join(", ", parts);
-    }
-
-    /**
-     * 三级 token 截断:>600 丢 topMerchants → >500 丢 preferredSizes → >400 丢 activeHours。
-     */
-    String truncate(String text) {
-        if (text == null) return "";
-        int tokens = estimateTokens(text);
-        if (tokens > props.getPromptTokenCap()) {
-            text = removeSection(text, "## 偏好商家\n");
-            tokens = estimateTokens(text);
-        }
-        if (tokens > DROP_SIZES_THRESHOLD) {
-            text = removeSection(text, "## 偏好尺码\n");
-            tokens = estimateTokens(text);
-        }
-        if (tokens > DROP_HOURS_THRESHOLD) {
-            text = removeSection(text, "## 活跃时段\n");
-        }
-        return text;
-    }
-
-    private static int estimateTokens(String text) {
-        // 简单估算:中英混合按 chars / 2
-        return text == null ? 0 : text.length() / 2;
-    }
-
-    private static String removeSection(String text, String header) {
-        int start = text.indexOf(header);
-        if (start < 0) return text;
-        int end = text.indexOf("\n## ", start + header.length());
-        if (end < 0) end = text.length();
-        return text.substring(0, start) + text.substring(end);
     }
 
     // ============================ 辅助 ============================

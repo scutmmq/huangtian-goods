@@ -73,7 +73,8 @@ class UserMemoryBuilderTest {
         when(jdbc.queryForObject(anyString(), any(RowMapper.class), any())).thenReturn(null);
         when(jdbc.query(anyString(), any(RowMapper.class), any())).thenReturn(List.of());
 
-        builder = new UserMemoryBuilder(jdbc, mapper, sanitizer, json, props, auditService);
+        PromptSectionRenderer renderer = new PromptSectionRenderer(props);
+        builder = new UserMemoryBuilder(jdbc, mapper, sanitizer, json, auditService, renderer);
     }
 
     // ============================ 7 条 SQL 关键字(8) ============================
@@ -364,6 +365,26 @@ class UserMemoryBuilderTest {
         verify(auditService, times(1)).logJsonOverflow(eq(7L), eq("preference"));
         assertEquals("{}", snap.preferenceJson(),
                 "should return empty snapshot when chk_preference_size fires, got: " + snap.preferenceJson());
+    }
+
+    /**
+     * 当 identity 写路径抛 chk_identity_size 时,builder 必须 catch 并:
+     *   1) auditService.logJsonOverflow(userId, "identity")
+     *   2) 返回 UserMemorySnapshot.empty()
+     * 镜像 computePreference 的 chk_preference_size 处理路径。
+     */
+    @Test
+    void computeIdentityHandlesChkIdentitySize() {
+        // 让 USER 查询抛 DataIntegrityViolationException(含 chk_identity_size)
+        when(jdbc.queryForObject(contains("FROM user"), any(RowMapper.class), eq(7L)))
+                .thenThrow(new DataIntegrityViolationException(
+                        "chk_identity_size: OCTET_LENGTH > 8192"));
+
+        UserMemorySnapshot snap = builder.computeIdentity(7L);
+
+        verify(auditService, times(1)).logJsonOverflow(eq(7L), eq("identity"));
+        assertEquals("{}", snap.identityJson(),
+                "should return empty snapshot when chk_identity_size fires, got: " + snap.identityJson());
     }
 
     // ============================ helpers ============================
