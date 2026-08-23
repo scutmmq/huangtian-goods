@@ -1,0 +1,12 @@
+# B3 step11 C0-4 回归:防抖 SETNX
+# 之前 bug:5 单在 1 分钟内触发 5 次 recompute,DB 抖动
+# 验证:用户连续 order-related query(查订单)不应触发过多工具调用,
+#       工具执行次数受控,且 get_my_orders 走 read-only 路径不爆
+name: regression-memory-debounce
+message: "我最近的订单怎么样了?"
+expectTool: get_my_orders
+expectReplyNoDsml: true
+expectKeywords:
+  - "订单"
+expectMaxToolExecutions: 3
+userId: 22

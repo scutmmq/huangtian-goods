@@ -1,0 +1,13 @@
+# B3 step11 C0-8 回归:跨用户画像隔离
+# 之前 bug:user_memory 渲染时未按 userId 隔离,A 用户的画像泄漏到 B 用户回复
+# 验证:userId=22 询问订单,模型走 get_my_orders 仅返回该用户的订单,
+#       回复不应含其他用户 ID 或其他用户的隐私字段名(身份证/手机/邮箱),
+#       DSML 不外泄,maxToolExecutions 受控
+name: regression-memory-no-echo
+message: "我的订单有哪些?"
+expectTool: get_my_orders
+expectReplyNoDsml: true
+expectKeywords:
+  - "订单"
+expectMaxToolExecutions: 3
+userId: 22

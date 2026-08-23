@@ -1,0 +1,17 @@
+# B3 step11 C0-3 回归:连续对话缓存命中
+# 之前 bug:每次 chat 都重 query DB + 重渲染 prompt,延迟高且触发 setIfAbsent 风暴
+# 验证:同用户单轮查商品(单条 message 模拟两次连续请求),走 search_products
+#       不超 maxToolExecutions,回复无 DSML,功能不退化
+name: regression-memory-cache-hit
+message: "我想买自行车,有什么推荐吗?"
+expectTool: search_products
+expectToolArgsContains:
+  search_products:
+    keyword: "自行车"
+expectReplyNoDsml: true
+expectKeywords:
+  - "自行车"
+  - "找到"
+  - "推荐"
+expectMaxToolExecutions: 5
+userId: 22

@@ -1,0 +1,13 @@
+# B3 step11 C0-6 回归:reset 后再对话
+# 之前 bug:reset 后 cache 仍命中,prompt 仍带已 reset 的画像
+# 验证:reset 后的用户走 chat 路径,不应因残留画像触发额外工具或异常回复
+name: regression-memory-reset
+message: "你好,刚刚重置过我的画像,你还记得我吗?"
+expectNoTools: true
+expectReplyNoDsml: true
+expectKeywords:
+  - "你好"
+  - "记得"
+  - "新"
+expectMaxToolExecutions: 2
+userId: 22

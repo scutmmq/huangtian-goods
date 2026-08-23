@@ -1,0 +1,17 @@
+# B3 step11 C0-2 回归:用户偏好召回
+# 之前 bug:用户已下过 3 单服饰,问"衣服"时未注入尺码偏好,推荐不相关
+# 验证:问"衣服"时,模型应主动 search_products,且回复不应因 prompt 注入段缺失而出现空内容
+name: regression-memory-preference
+message: "我想买衣服,有推荐吗?"
+expectTool: search_products
+expectToolArgsContains:
+  search_products:
+    keyword: "衣服"
+expectReplyNoDsml: true
+expectKeywords:
+  - "衣"
+  - "商品"
+  - "推荐"
+  - "尺码"
+expectMaxToolExecutions: 5
+userId: 22

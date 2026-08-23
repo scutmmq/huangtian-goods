@@ -1,0 +1,11 @@
+# B3 step11 C0-5 回归:Redis 不可用时读路径仍可用
+# 之前 bug:Redis down 时 UserMemoryService.renderMemorySection 抛 NPE,read path 全挂
+# 验证:查订单(纯 DB read 路径,模拟 Redis down 降级)仍可成功,工具调用 + 回复都正常
+name: regression-memory-recompute-fallback
+message: "帮我看一下我的订单列表"
+expectTool: get_my_orders
+expectReplyNoDsml: true
+expectKeywords:
+  - "订单"
+expectMaxToolExecutions: 3
+userId: 22

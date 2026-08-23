@@ -1,0 +1,14 @@
+# B3 step11 C0-1 回归:新用户首次对话
+# 之前 bug:新用户 userId 在 user_memory 表无记录时,system prompt 拼接异常 / NPE
+# 验证:首次对话(无画像)走纯 chat 路径,不应因 null 画像崩溃,回复走用户友好欢迎
+name: regression-memory-identity
+message: "你好,我是新用户,能帮我介绍一下你能做什么吗?"
+expectNoTools: true
+expectReplyNoDsml: true
+expectKeywords:
+  - "你好"
+  - "欢迎"
+  - "可以"
+  - "帮助"
+expectMaxToolExecutions: 2
+userId: 22
