@@ -12,8 +12,11 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -37,12 +40,13 @@ import static org.mockito.Mockito.when;
 /**
  * B3 step7: MemoryCronScheduler 单元测试。
  *
- * <p>4 个核心场景:
+ * <p>5 个核心场景:
  * <ul>
  *   <li>{@code cronAcquiresLockAndProcesses1000Batch} — 锁获取 + 1000 一批 + TRIGGER_CRON</li>
  *   <li>{@code cronSkipsWhenLockHeld} — 锁被他人持有时 skip metric + 不调 service</li>
  *   <li>{@code partitionDropAcquiresLock} — drop 调 INFORMATION_SCHEMA + ALTER TABLE</li>
  *   <li>{@code watchdogForceUnlocksWhenNoProgress} — 30 分钟无进度 → forceUnlock + counter</li>
+ *   <li>{@code cronWritesProgressToRedis} — 验证每批完成后跨实例共享进度写入 Redis(跨实例僵死检测基础)</li>
  * </ul>
  *
  * <p>纯 mock,不依赖 Spring 容器;{@code @Scheduled} 注解由 Spring 容器保障触发。
@@ -57,6 +61,8 @@ class MemoryCronSchedulerTest {
     private JdbcTemplate jdbc;
     private AiMemoryProperties props;
     private MeterRegistry meter;
+    private StringRedisTemplate stringRedis;
+    private ValueOperations<String, String> valueOps;
     private MemoryCronScheduler scheduler;
 
     @BeforeEach
@@ -74,16 +80,20 @@ class MemoryCronSchedulerTest {
         props.setAuditPartitionRetentionDays(90);
         meter = new SimpleMeterRegistry();
 
+        stringRedis = mock(StringRedisTemplate.class);
+        valueOps = mock(ValueOperations.class);
+        when(stringRedis.opsForValue()).thenReturn(valueOps);
+
         when(redisson.getLock(RedisConstants.MEMORY_CRON_LOCK_KEY)).thenReturn(cronLock);
         when(redisson.getLock(RedisConstants.MEMORY_PARTITION_DROP_LOCK_KEY)).thenReturn(partitionLock);
         // 默认 lock 由当前线程持有(便于 unlock 验证)
         when(cronLock.isHeldByCurrentThread()).thenReturn(true);
         when(partitionLock.isHeldByCurrentThread()).thenReturn(true);
 
-        scheduler = new MemoryCronScheduler(redisson, mapper, service, jdbc, props, meter);
+        scheduler = new MemoryCronScheduler(redisson, mapper, service, jdbc, props, meter, stringRedis);
     }
 
-    // ============================ 4 tests ============================
+    // ============================ 5 tests ============================
 
     /**
      * 锁获取 + 游标分批:模拟一批返回 1000 个 ID,下一批返回空。验证:
@@ -139,6 +149,9 @@ class MemoryCronSchedulerTest {
 
         // 不调 unlock(因为不是当前线程持有)
         verify(cronLock, never()).unlock();
+
+        // 锁被他人持有时,本实例不应写进度(避免污染跨实例进度视图)
+        verify(valueOps, never()).set(eq(RedisConstants.MEMORY_CRON_PROGRESS_KEY), any(), any(Duration.class));
     }
 
     /**
@@ -171,18 +184,62 @@ class MemoryCronSchedulerTest {
     }
 
     /**
-     * Watchdog:锁被持有 + lastProgressMs 超过 30 分钟无增长 → forceUnlock + counter。
+     * Watchdog:锁被持有 + Redis 中上次进度超过 30 分钟无增长 → forceUnlock + counter。
+     * 进度通过 setLastProgressMs → writeCronProgress 写入 Redis,模拟"其他实例写过进度"。
      */
     @Test
     void watchdogForceUnlocksWhenNoProgress() {
         when(cronLock.isLocked()).thenReturn(true);
-        // 模拟 1 小时前有过进度
-        scheduler.setLastProgressMs(System.currentTimeMillis() - 60 * 60 * 1000L);
+        // 模拟 1 小时前有过进度(由其他实例写入 Redis)
+        long staleTs = System.currentTimeMillis() - 60 * 60 * 1000L;
+        scheduler.setLastProgressMs(staleTs);
+        // 让 watchdog 读 Redis 时返回该陈旧时间戳
+        when(valueOps.get(RedisConstants.MEMORY_CRON_PROGRESS_KEY))
+                .thenReturn(String.valueOf(staleTs));
 
         scheduler.cronWatchdog();
 
         verify(cronLock).forceUnlock();
         assertEquals(1.0,
                 meter.counter("ai_memory_cron_lock_lost_total", "reason", "timeout").count(), 0.001);
+    }
+
+    /**
+     * 跨实例进度共享:每批完成后写入 Redis MEMORY_CRON_PROGRESS_KEY。
+     * 验证:
+     * <ul>
+     *   <li>每批完成后调一次 valueOps.set(progressKey, ts, Duration.ofMinutes(60))</li>
+     *   <li>写入的时间戳字符串可被 Long.parseLong</li>
+     *   <li>TTL = 60min > leaseTime 50min,保证 leaseTime 兜底之前 key 不会被 Redis 清掉</li>
+     * </ul>
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void cronWritesProgressToRedis() throws InterruptedException {
+        when(cronLock.tryLock(0, 50, TimeUnit.MINUTES)).thenReturn(true);
+
+        List<Long> firstBatch = LongStream.rangeClosed(1, 1000).boxed().collect(java.util.stream.Collectors.toList());
+        when(mapper.findStaleUserIds(eq(0L), anyLong(), anyInt(), eq(1000))).thenReturn(firstBatch);
+        when(mapper.findStaleUserIds(eq(1000L), anyLong(), anyInt(), eq(1000))).thenReturn(Collections.emptyList());
+
+        long beforeRun = System.currentTimeMillis();
+        scheduler.recomputeStaleBatch();
+        long afterRun = System.currentTimeMillis();
+
+        // 至少写了一次进度(一整批)
+        ArgumentCaptor<String> valCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Duration> ttlCaptor = ArgumentCaptor.forClass(Duration.class);
+        verify(valueOps, atLeast(1)).set(eq(RedisConstants.MEMORY_CRON_PROGRESS_KEY),
+                valCaptor.capture(), ttlCaptor.capture());
+
+        // TTL = 60 分钟(> leaseTime 50min,保证兜底)
+        assertEquals(1, ttlCaptor.getAllValues().size());
+        assertEquals(Duration.ofMinutes(60L), ttlCaptor.getValue());
+
+        // 写入的时间戳在 [beforeRun, afterRun] 区间内
+        String written = valCaptor.getValue();
+        long parsed = Long.parseLong(written);
+        assertTrue(parsed >= beforeRun && parsed <= afterRun,
+                "progress ts " + parsed + " should be within [" + beforeRun + ", " + afterRun + "]");
     }
 }
