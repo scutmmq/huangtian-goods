@@ -22,6 +22,7 @@ import com.scutmmq.vo.SignResult;
 import com.scutmmq.vo.UserVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.redis.connection.BitFieldSubCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -37,6 +38,9 @@ import static com.scutmmq.utils.RedisConstants.*;
 public class UserServiceImpl extends ServiceImpl<UserMapper,User> implements UserService {
 
     private  final  StringRedisTemplate stringRedisTemplate;
+
+    // B3 step6: 发布 UserMemory ProfileUpdated 事件
+    private final ApplicationEventPublisher applicationEventPublisher;
 
     @Override
     public Result login(LoginDTO loginDTO) {
@@ -158,6 +162,18 @@ public class UserServiceImpl extends ServiceImpl<UserMapper,User> implements Use
 
         // 删除原来的缓存
         stringRedisTemplate.delete(CACHE_USER+id);
+
+        // B3 step6: 发布资料更新事件 — AFTER_COMMIT 阶段由 UserMemoryEventListener 接收并重算偏好
+        java.util.List<String> changedFields = new java.util.ArrayList<>();
+        if (user.getEmail() != null && !user.getEmail().isEmpty()) changedFields.add("email");
+        if (user.getPhone() != null && !user.getPhone().isEmpty()) changedFields.add("phone");
+        if (user.getBirthday() != null) changedFields.add("birthday");
+        if (user.getNickName() != null && !user.getNickName().isEmpty()) changedFields.add("nickName");
+        if (user.getAddress() != null && !user.getAddress().isEmpty()) changedFields.add("address");
+        if (user.getImage() != null && !user.getImage().isEmpty()) changedFields.add("image");
+        if (user.getGender() != null) changedFields.add("gender");
+        applicationEventPublisher.publishEvent(
+                new com.scutmmq.ai.event.ProfileUpdatedEvent(this, id, changedFields));
 
         return  Result.success();
     }

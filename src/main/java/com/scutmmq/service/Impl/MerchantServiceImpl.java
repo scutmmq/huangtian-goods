@@ -14,6 +14,7 @@ import com.scutmmq.utils.RedisConstants;
 import com.scutmmq.utils.UserHolder;
 import com.scutmmq.vo.ProductVO;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -32,6 +33,9 @@ public class MerchantServiceImpl extends ServiceImpl<MerchantMapper, Merchant> i
     private final ProductMapper productMapper;
 
     private final StringRedisTemplate redisTemplate;
+
+    // B3 step6: 发布 MerchantRegistered 事件
+    private final ApplicationEventPublisher applicationEventPublisher;
 
     @Override
     public Result addMerchant(Merchant merchant) {
@@ -58,6 +62,10 @@ public class MerchantServiceImpl extends ServiceImpl<MerchantMapper, Merchant> i
         merchantUser.setMerchantId(merchant.getId());
         merchantUser.setUserId(userId);
         merchantUserService.save(merchantUser);
+
+        // B3 step6: 发布商家注册事件 — AFTER_COMMIT 阶段由 UserMemoryEventListener 接收
+        applicationEventPublisher.publishEvent(
+                new com.scutmmq.ai.event.MerchantRegisteredEvent(this, userId, merchant.getId()));
 
         return Result.success();
     }

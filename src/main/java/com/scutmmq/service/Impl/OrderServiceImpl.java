@@ -75,6 +75,9 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
     private final UserService userService;
 
     private final MerchantMapper merchantMapper;
+
+    // B3 step6: 发布 UserMemory 领域事件(OrderPlaced / OrderRefunded)
+    private final org.springframework.context.ApplicationEventPublisher applicationEventPublisher;
     @Override
     @LogAnnotation(type = OperationType.INSERT,description = "添加订单")
     public Result addOrder(OrdersDTO ordersDTO) {
@@ -221,6 +224,10 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
             if(!saved) throw new BusinessException("订单添加失败");
 
             // 创建订单成功,设置
+
+            // 发布下单事件 — B3 step6 触发长期记忆重算;AFTER_COMMIT 阶段由 UserMemoryEventListener 接收
+            applicationEventPublisher.publishEvent(
+                    new com.scutmmq.ai.event.OrderPlacedEvent(this, orders.getUserId(), id, java.time.Instant.now()));
 
             // 返回信息给前端
             AddOrdersVO addOrdersVO = new AddOrdersVO();
@@ -483,6 +490,10 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
             String now = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
             String content = "系统消息：您的订单#" + orders.getId() + "退货申请已批准，时间" + now + "。退款将尽快处理";
             notificationService.sendToUser(orders.getUserId(), content);
+
+            // 发布退款事件 — B3 step6 触发长期记忆重算(退货率统计);AFTER_COMMIT 阶段
+            applicationEventPublisher.publishEvent(
+                    new com.scutmmq.ai.event.OrderRefundedEvent(this, orders.getUserId(), orders.getId(), java.time.Instant.now()));
 
             return  Result.success();
         }catch (Exception e){
