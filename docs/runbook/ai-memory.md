@@ -268,11 +268,11 @@ curl -s http://online-mall-app:8080/actuator/prometheus | grep "^ai_memory_injec
 
 **应急**:
 
-1. 看 `ai_user_memory_audit` 查 `action='PROMPT_INJECTION'`,定位攻击源 userId:
+1. 看 `ai_user_memory_audit` 查 `action='PROMPT_INJECTION_DROP'`,定位攻击源 userId:
    ```bash
    mysql -u$MYSQL_USER -p$MYSQL_PASS online_mall -e \
      "SELECT user_id, COUNT(*) AS hits FROM ai_user_memory_audit \
-      WHERE action='PROMPT_INJECTION' AND created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR) \
+      WHERE action='PROMPT_INJECTION_DROP' AND created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR) \
       GROUP BY user_id ORDER BY hits DESC LIMIT 10;"
    ```
 2. 若同一 userId 命中 > 50 次/小时,人工 freeze account(走现有风控 SOP,不在本 runbook 范围)。

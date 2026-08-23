@@ -282,13 +282,28 @@ class UserMemoryServiceTest {
     void resetTriggersAsyncPurge() {
         service.reset(7L);
 
-        // 必须异步提交 purgeAuditAsync(不能同步调用,会阻塞主线程)
-        assertEquals(1, asyncExec.submittedCount(), "async purge should be submitted");
-        // 把 runnable 取出来跑一下,验证 it calls auditService.purgeAuditAsync
-        Runnable task = asyncExec.lastSubmitted();
-        assertNotNull(task);
-        task.run();
-        verify(auditService).purgeAuditAsync(eq(7L));
+        // B3 fix(Bug 2):reset 不再 outer asyncExecutor.execute — purgeAuditAsync 自身就是 @Async
+        assertEquals(0, asyncExec.submittedCount(),
+                "no outer async task should be submitted (purgeAuditAsync is already @Async)");
+        // 直接调 auditService.purgeAuditAsync
+        verify(auditService, times(1)).purgeAuditAsync(eq(7L));
+    }
+
+    @Test
+    void resetInvokesPurgeAuditAsyncDirectly() {
+        // B3 fix(Bug 2):验证 reset 不再走 asyncExecutor.execute,而是直接调 auditService.purgeAuditAsync
+        service.reset(7L);
+
+        // 1) auditService.purgeAuditAsync 必须被调 1 次
+        verify(auditService, times(1)).purgeAuditAsync(eq(7L));
+        // 2) asyncExecutor.execute 不应被调(防止双层调度)
+        assertEquals(0, asyncExec.submittedCount(),
+                "asyncExecutor.execute must NOT be called from reset (Bug 2 fix)");
+        // 3) logReset 仍走同步路径
+        verify(auditService, times(1)).logReset(eq(7L), any(), any());
+        // 4) 同步写路径不变
+        verify(mapper, times(1)).resetMemory(eq(7L));
+        verify(cache, times(1)).invalidate(eq(7L));
     }
 
     // ============================== 乐观锁 (1) ==============================

@@ -1,6 +1,8 @@
 package com.scutmmq.ai.security;
 
 import com.scutmmq.ai.observability.UserMemoryMetrics;
+import com.scutmmq.ai.service.AuditService;
+import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -40,8 +42,15 @@ public class PromptSanitizer {
     /** B3 step10: 黑名单命中计数器由 {@link UserMemoryMetrics} 集中管理。 */
     private final UserMemoryMetrics metrics;
 
-    public PromptSanitizer(UserMemoryMetrics metrics) {
+    /**
+     * B3 fix(Bug 1):注入审计。审计失败不影响 sanitization —— 主链路优先,
+     * 异常吞掉走 {@link UserMemoryMetrics} 的 prom counter。
+     */
+    private final AuditService auditService;
+
+    public PromptSanitizer(UserMemoryMetrics metrics, AuditService auditService) {
         this.metrics = metrics;
+        this.auditService = auditService;
     }
 
     /**
@@ -58,6 +67,14 @@ public class PromptSanitizer {
         for (Pattern p : DENY_LIST) {
             if (p.matcher(raw).find()) {
                 metrics.recordPromptInjectionDrop();
+                // B3 fix(Bug 1):命中即写审计行,userId 取 MDC(MallUserContextExecutor 已写入),
+                // 缺 / 解析失败 → null(对应 audit 行 user_id NULL,spec §7A.4 允许)。
+                Long userId = parseLongOrNull(MDC.get("userId"));
+                try {
+                    auditService.logPromptInjectionDrop(userId, raw);
+                } catch (Exception ignore) {
+                    // 审计失败不能阻塞 sanitization 主路径,吞掉走 prom counter。
+                }
                 throw new PromptInjectionException(
                         "Deny-list match: " + p.pattern() + " input=" + raw);
             }
@@ -67,6 +84,15 @@ public class PromptSanitizer {
             return "[FILTERED]";
         }
         return escapeJson(raw);
+    }
+
+    private static Long parseLongOrNull(String s) {
+        if (s == null || s.isEmpty()) return null;
+        try {
+            return Long.parseLong(s);
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     /**

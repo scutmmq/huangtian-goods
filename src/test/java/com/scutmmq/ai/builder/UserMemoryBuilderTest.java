@@ -64,8 +64,9 @@ class UserMemoryBuilderTest {
         mapper = mock(UserMemoryMapper.class);
         // 真实 metrics:覆盖 pre-registered counter/summary + sanitize DENY/SAFE
         UserMemoryMetrics metrics = new UserMemoryMetrics(new SimpleMeterRegistry());
-        sanitizer = new PromptSanitizer(metrics);
         auditService = mock(AuditService.class);
+        // B3 fix(Bug 1):PromptSanitizer 现接受 AuditService,测试 mock 注入
+        sanitizer = new PromptSanitizer(metrics, auditService);
         props = new AiMemoryProperties();
         props.setCacheHmacSecrets("v1:abcdefghijklmnopqrstuvwxyz12345678");
         props.setActiveSecretVersion("v1");

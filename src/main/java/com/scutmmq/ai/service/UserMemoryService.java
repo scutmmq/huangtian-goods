@@ -296,7 +296,9 @@ public class UserMemoryService {
         }
         cache.invalidate(userId);
         auditService.logReset(userId, null, null);
-        asyncExecutor.execute(() -> auditService.purgeAuditAsync(userId));
+        // B3 fix(Bug 2):purgeAuditAsync 已是 @Async("memoryAsyncExecutor"),直接调;
+        // 外层再 asyncExecutor.execute 是双层调度,浪费池槽位且延迟增加。
+        auditService.purgeAuditAsync(userId);
         return true;
     }
 
