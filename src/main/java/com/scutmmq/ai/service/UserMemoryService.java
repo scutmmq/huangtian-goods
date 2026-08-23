@@ -21,7 +21,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
-import java.util.concurrent.TimeUnit;
 
 /**
  * B3 step5: 用户长期记忆的协调层。
@@ -372,41 +371,6 @@ public class UserMemoryService {
     private static class OptimisticLockRetryException extends RuntimeException {
         OptimisticLockRetryException(String msg) {
             super(msg);
-        }
-    }
-
-    /**
-     * 简易令牌桶:不引 Guava(项目无依赖),用 synchronized 保证线程安全。
-     * 容量 = {@code capacity},每隔 {@code refillIntervalNanos} 补 1 个令牌。
-     */
-    static final class LocalTokenBucket {
-        private final long capacity;
-        private final long refillIntervalNanos;
-        private long tokens;
-        private long lastRefillNanos;
-
-        LocalTokenBucket(long capacity, long refillPerSecond) {
-            this.capacity = capacity;
-            this.refillIntervalNanos = TimeUnit.SECONDS.toNanos(1) / Math.max(1, refillPerSecond);
-            this.tokens = capacity;
-            this.lastRefillNanos = System.nanoTime();
-        }
-
-        synchronized boolean tryAcquire() {
-            long now = System.nanoTime();
-            long elapsed = now - lastRefillNanos;
-            if (elapsed > 0) {
-                long refilled = elapsed / refillIntervalNanos;
-                if (refilled > 0) {
-                    tokens = Math.min(capacity, tokens + refilled);
-                    lastRefillNanos += refilled * refillIntervalNanos;
-                }
-            }
-            if (tokens > 0) {
-                tokens--;
-                return true;
-            }
-            return false;
         }
     }
 }
