@@ -166,9 +166,6 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
                 return UserMemorySnapshot.empty();
             }
             throw e;
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            log.error("[AI][MEMORY] computeIdentity JSON serialization failed userId={}", userId, e);
-            return UserMemorySnapshot.empty();
         } catch (Exception e) {
             log.error("[AI][MEMORY] computeIdentity failed userId={}", userId, e);
             return UserMemorySnapshot.empty();
@@ -239,9 +236,6 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
                 return UserMemorySnapshot.empty();
             }
             throw e;
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            log.error("[AI][MEMORY] computePreference JSON serialization failed userId={}", userId, e);
-            return UserMemorySnapshot.empty();
         } catch (Exception e) {
             log.error("[AI][MEMORY] computePreference failed userId={}", userId, e);
             return UserMemorySnapshot.empty();
