@@ -11,4 +11,12 @@ package com.scutmmq.ai.service;
  * @param preferenceJson 偏好画像 JSON,例 {@code {"priceRange":"mid","favoriteCategories":["book"]}}
  */
 public record UserMemorySnapshot(String identityJson, String preferenceJson) {
+
+    /**
+     * 新用户/重算失败/JSON OVERFLOW 降级时使用的全空快照。
+     * 与"已生成但内容很短"的快照语义不同,后者应返回正常 JSON。
+     */
+    public static UserMemorySnapshot empty() {
+        return new UserMemorySnapshot("{}", "{}");
+    }
 }

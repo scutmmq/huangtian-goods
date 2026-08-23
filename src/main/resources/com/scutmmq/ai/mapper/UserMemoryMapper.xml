@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.scutmmq.ai.mapper.UserMemoryMapper">
+
+    <!--
+        B3 step4: 用户长期记忆聚合 SQL(7 条),与 UserMemoryBuilder 内部常量保持同步。
+        所有查询都过滤 user_id=? AND ordered_at >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+                                    AND status IN ('paid','shipped','delivered'),
+        防止陈旧订单污染近 90 天偏好画像。
+    -->
+
+    <!-- 1. 价格区间:AVG + p25/p50/p75 + MAX,排除 0 元订单 -->
+    <select id="priceRangeStats" resultType="com.scutmmq.ai.builder.UserMemoryBuilder$PriceRangeRow">
+        SELECT
+          ROUND(AVG(o.total_amount), 2)    AS avg,
+          ROUND(PERCENTILE_DISC(0.25) WITHIN GROUP (ORDER BY o.total_amount), 2) AS p25,
+          ROUND(PERCENTILE_DISC(0.50) WITHIN GROUP (ORDER BY o.total_amount), 2) AS p50,
+          ROUND(PERCENTILE_DISC(0.75) WITHIN GROUP (ORDER BY o.total_amount), 2) AS p75,
+          MAX(o.total_amount)               AS max
+        FROM orders o
+        WHERE o.user_id = #{userId}
+          AND o.ordered_at &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND o.status IN ('paid','shipped','delivered')
+          AND o.total_amount &gt; 0
+    </select>
+
+    <!-- 2. 偏好类目:JOIN 4 表,按 spend 排序 LIMIT 3 -->
+    <select id="topCategories" resultType="com.scutmmq.ai.builder.UserMemoryBuilder$CategoryRow">
+        SELECT pc.id   AS categoryId,
+               pc.name AS categoryName,
+               SUM(oi.subtotal)        AS spend,
+               COUNT(DISTINCT o.id)    AS orderCount
+        FROM orders o
+        JOIN order_items oi ON oi.order_id = o.id
+        JOIN product p      ON p.id        = oi.product_id
+        JOIN product_category pc ON pc.id   = p.category_id
+        WHERE o.user_id = #{userId}
+          AND o.ordered_at &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND o.status IN ('paid','shipped','delivered')
+        GROUP BY pc.id, pc.name
+        ORDER BY spend DESC
+        LIMIT 3
+    </select>
+
+    <!-- 3. 偏好商家:JOIN orders / merchant,按 spend 排序 LIMIT 3 -->
+    <select id="topMerchants" resultType="com.scutmmq.ai.builder.UserMemoryBuilder$MerchantRow">
+        SELECT m.id   AS merchantId,
+               m.name AS merchantName,
+               SUM(o.total_amount)    AS spend,
+               COUNT(DISTINCT o.id)   AS orderCount
+        FROM orders o
+        JOIN merchant m ON m.id = o.merchant_id
+        WHERE o.user_id = #{userId}
+          AND o.ordered_at &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND o.status IN ('paid','shipped','delivered')
+        GROUP BY m.id, m.name
+        ORDER BY spend DESC
+        LIMIT 3
+    </select>
+
+    <!-- 4. 退货率:所有订单总数 + 已退款数 + 比例 -->
+    <select id="returnRate" resultType="com.scutmmq.ai.builder.UserMemoryBuilder$ReturnRateRow">
+        SELECT
+          COUNT(*) AS total,
+          SUM(CASE WHEN o.payment_status = 'refunded' THEN 1 ELSE 0 END) AS refunded,
+          ROUND(SUM(CASE WHEN o.payment_status = 'refunded' THEN 1 ELSE 0 END) * 1.0
+                / NULLIF(COUNT(*), 0), 4) AS rate
+        FROM orders o
+        WHERE o.user_id = #{userId}
+          AND o.ordered_at &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND o.status IN ('paid','shipped','delivered')
+    </select>
+
+    <!-- 5. 偏好支付方式:GROUP BY payment_method -->
+    <select id="paymentMethodPref" resultType="com.scutmmq.ai.builder.UserMemoryBuilder$PaymentMethodRow">
+        SELECT o.payment_method AS method,
+               COUNT(*)         AS count
+        FROM orders o
+        WHERE o.user_id = #{userId}
+          AND o.ordered_at &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND o.status IN ('paid','shipped','delivered')
+        GROUP BY o.payment_method
+        ORDER BY count DESC
+    </select>
+
+    <!-- 6. 偏好配送方式:GROUP BY shipping_method(忽略 NULL) -->
+    <select id="shippingMethodPref" resultType="com.scutmmq.ai.builder.UserMemoryBuilder$ShippingMethodRow">
+        SELECT o.shipping_method AS method,
+               COUNT(*)          AS count
+        FROM orders o
+        WHERE o.user_id = #{userId}
+          AND o.ordered_at &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND o.status IN ('paid','shipped','delivered')
+          AND o.shipping_method IS NOT NULL
+        GROUP BY o.shipping_method
+        ORDER BY count DESC
+    </select>
+
+    <!-- 7. 活跃时段:按 HOUR(ordered_at) 分组 TOP 5 -->
+    <select id="activeHours" resultType="com.scutmmq.ai.builder.UserMemoryBuilder$ActiveHoursRow">
+        SELECT HOUR(o.ordered_at) AS hour,
+               COUNT(*)           AS count
+        FROM orders o
+        WHERE o.user_id = #{userId}
+          AND o.ordered_at &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND o.status IN ('paid','shipped','delivered')
+        GROUP BY HOUR(o.ordered_at)
+        ORDER BY count DESC
+        LIMIT 5
+    </select>
+
+</mapper>
