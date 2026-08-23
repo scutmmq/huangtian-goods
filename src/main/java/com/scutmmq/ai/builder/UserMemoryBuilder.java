@@ -3,14 +3,11 @@ package com.scutmmq.ai.builder;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scutmmq.ai.mapper.UserMemoryMapper;
+import com.scutmmq.ai.observability.UserMemoryMetrics;
 import com.scutmmq.ai.security.PromptSanitizer;
 import com.scutmmq.ai.security.PromptSanitizer.FieldType;
 import com.scutmmq.ai.service.AuditService;
 import com.scutmmq.ai.service.UserMemorySnapshot;
-import io.micrometer.core.instrument.Counter;
-import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.core.instrument.Tags;
-import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -18,7 +15,6 @@ import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Component;
 
 import java.sql.Date;
-import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
@@ -41,76 +37,14 @@ import static com.scutmmq.ai.builder.UserMemorySql.USER;
 import static com.scutmmq.ai.builder.UserMemorySql.USER_MERCHANT;
 
 /**
- * B3 step4: 用户长期记忆画像构建器(SQL 聚合 + sanitize + token 截断)。
+ * B3 step4: 用户长期记忆画像构建器。
  *
- * <p>职责:
- * <ul>
- *   <li>computeIdentity — 查 user / user_address / merchant → identityJson,
- *       捕获 chk_identity_size 做 JSON OVERFLOW 降级</li>
- *   <li>computePreference — 跑 7 条聚合 SQL(与 mapper.xml + UserMemorySql 同步)→ preferenceJson,
- *       捕获 chk_preference_size 做 JSON OVERFLOW 降级</li>
- *   <li>renderForPrompt — 反序列化 preferenceJson + 拼接 markdown 段,
- *       按 token 阈值截断,委托 {@link PromptSectionRenderer} 实现</li>
- * </ul>
- *
- * <p>SQL 走 JdbcTemplate 直接调用(常量见 {@link UserMemorySql}),便于单测 mock;
- * mapper.xml 保留作为 MyBatis 复用入口,字符串与本类引用完全一致。
+ * <p>SQL 常量见 {@link UserMemorySql};聚合行类型见 {@link UserMemoryRow};
+ * 指标见 {@link UserMemoryMetrics};SQL 渲染见 {@link PromptSectionRenderer}。
  */
 @Slf4j
 @Component
 public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuilder {
-
-    // ============================ 内部记录类(7 条聚合行) ============================
-
-    public record PriceRangeRow(Double avg, Double p25, Double p50, Double p75, Double max) {
-        public static RowMapper<PriceRangeRow> mapper() {
-            return (rs, n) -> new PriceRangeRow(
-                    dbl(rs, "avg"), dbl(rs, "p25"), dbl(rs, "p50"), dbl(rs, "p75"), dbl(rs, "max"));
-        }
-    }
-
-    public record CategoryRow(Long categoryId, String categoryName, Double spend, Integer orderCount) {
-        public static RowMapper<CategoryRow> mapper() {
-            return (rs, n) -> new CategoryRow(rs.getLong("categoryId"), rs.getString("categoryName"),
-                    dbl(rs, "spend"), intOrNull(rs, "orderCount"));
-        }
-    }
-
-    public record MerchantRow(Long merchantId, String merchantName, Double spend, Integer orderCount) {
-        public static RowMapper<MerchantRow> mapper() {
-            return (rs, n) -> new MerchantRow(rs.getLong("merchantId"), rs.getString("merchantName"),
-                    dbl(rs, "spend"), intOrNull(rs, "orderCount"));
-        }
-    }
-
-    public record ReturnRateRow(Long total, Long refunded, Double rate) {
-        public static RowMapper<ReturnRateRow> mapper() {
-            return (rs, n) -> new ReturnRateRow(lng(rs, "total"), lng(rs, "refunded"), dbl(rs, "rate"));
-        }
-    }
-
-    public record PaymentMethodRow(String method, Long count) {
-        public static RowMapper<PaymentMethodRow> mapper() {
-            return (rs, n) -> new PaymentMethodRow(rs.getString("method"), lng(rs, "count"));
-        }
-    }
-
-    public record ShippingMethodRow(String method, Long count) {
-        public static RowMapper<ShippingMethodRow> mapper() {
-            return (rs, n) -> new ShippingMethodRow(rs.getString("method"), lng(rs, "count"));
-        }
-    }
-
-    public record ActiveHoursRow(Integer hour, Long count) {
-        public static RowMapper<ActiveHoursRow> mapper() {
-            return (rs, n) -> new ActiveHoursRow(intOrNull(rs, "hour"), lng(rs, "count"));
-        }
-    }
-
-    // ============================ 依赖 ============================
-
-    /** B3 step10: DB 查询耗时"长事务"阈值(>1s 视为长事务,记 counter) */
-    private static final long DB_LONG_TX_THRESHOLD_MS = 1_000L;
 
     private final JdbcTemplate jdbc;
     @SuppressWarnings("unused") // 注入以满足 spec 期望(mapper.xml 复用入口)
@@ -119,51 +53,22 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
     private final ObjectMapper json;
     private final AuditService auditService;
     private final PromptSectionRenderer renderer;
-    private final MeterRegistry meter;
-
-    /** B3 step10: token 估算 summary — {@code ai_memory_injection_token_total{quantile=0.5|0.95}} */
-    private final io.micrometer.core.instrument.DistributionSummary injectionTokenSummary;
-
-    /** B3 step10: DB 长事务计数器 — {@code ai_memory_db_long_tx_total} */
-    private final Counter dbLongTxCounter;
+    private final UserMemoryMetrics metrics;
 
     public UserMemoryBuilder(JdbcTemplate jdbc, UserMemoryMapper mapper, PromptSanitizer sanitizer,
                              ObjectMapper json, AuditService auditService, PromptSectionRenderer renderer,
-                             MeterRegistry meter) {
+                             UserMemoryMetrics metrics) {
         this.jdbc = jdbc;
         this.mapper = mapper;
         this.sanitizer = sanitizer;
         this.json = json;
         this.auditService = auditService;
         this.renderer = renderer;
-        this.meter = meter;
-        this.injectionTokenSummary = io.micrometer.core.instrument.DistributionSummary
-                .builder("ai_memory_injection_token_total")
-                .description("注入到 prompt 的画像 token 估算(基于 chars/2)")
-                .publishPercentiles(0.5, 0.95)
-                .register(meter);
-        this.dbLongTxCounter = Counter.builder("ai_memory_db_long_tx_total")
-                .description("DB 查询 >1s 视为长事务计数")
-                .register(meter);
+        this.metrics = metrics;
     }
 
-    /** B3 step10: 记录一条 DB 查询耗时到 ai_memory_db_query_seconds{sql}。 */
     private void recordDbQuery(String sqlName, Runnable query) {
-        long start = System.currentTimeMillis();
-        try {
-            query.run();
-        } finally {
-            long elapsed = System.currentTimeMillis() - start;
-            Timer.builder("ai_memory_db_query_seconds")
-                    .description("记忆 SQL 查询耗时分布")
-                    .tags(Tags.of("sql", sqlName))
-                    .publishPercentiles(0.5, 0.95, 0.99)
-                    .register(meter)
-                    .record(elapsed, java.util.concurrent.TimeUnit.MILLISECONDS);
-            if (elapsed > DB_LONG_TX_THRESHOLD_MS) {
-                dbLongTxCounter.increment();
-            }
-        }
+        metrics.recordDbQuery(sqlName, query);
     }
 
     // ============================ computeIdentity ============================
@@ -187,7 +92,7 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
                     identity.put("accountAgeDays", computeAccountAgeDays(user.get("createdAt")));
                 }
             } catch (DataIntegrityViolationException e) {
-                // chk_identity_size 由外层 catch 统一审计降级,这里直接 rethrow
+                // 留给外层 catch 走 JSON OVERFLOW 降级
                 throw e;
             } catch (Exception e) {
                 log.warn("[AI][MEMORY] identity user query failed userId={} reason={}", userId, e.getMessage());
@@ -246,16 +151,16 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
             // price_range
             final Object[] priceBox = new Object[]{null};
             recordDbQuery("price_range", () -> {
-                priceBox[0] = jdbc.queryForObject(PRICE_RANGE, PriceRangeRow.mapper(), userId);
+                priceBox[0] = jdbc.queryForObject(PRICE_RANGE, UserMemoryRow.PriceRangeRow.mapper(), userId);
             });
             pref.put("priceRange", orEmpty(priceBox[0]));
 
             // top_categories
-            final List<CategoryRow>[] catsBox = new List[]{List.of()};
+            final List<UserMemoryRow.CategoryRow>[] catsBox = new List[]{List.of()};
             recordDbQuery("top_categories", () -> {
-                catsBox[0] = jdbc.query(TOP_CATEGORIES, CategoryRow.mapper(), userId);
+                catsBox[0] = jdbc.query(TOP_CATEGORIES, UserMemoryRow.CategoryRow.mapper(), userId);
             });
-            List<CategoryRow> cats = catsBox[0];
+            List<UserMemoryRow.CategoryRow> cats = catsBox[0];
             List<Map<String, Object>> sanitizedCats = cats.stream().map(c -> {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("categoryId", c.categoryId());
@@ -267,11 +172,11 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
             pref.put("topCategories", sanitizedCats);
 
             // top_merchants
-            final List<MerchantRow>[] mersBox = new List[]{List.of()};
+            final List<UserMemoryRow.MerchantRow>[] mersBox = new List[]{List.of()};
             recordDbQuery("top_merchants", () -> {
-                mersBox[0] = jdbc.query(TOP_MERCHANTS, MerchantRow.mapper(), userId);
+                mersBox[0] = jdbc.query(TOP_MERCHANTS, UserMemoryRow.MerchantRow.mapper(), userId);
             });
-            List<MerchantRow> mers = mersBox[0];
+            List<UserMemoryRow.MerchantRow> mers = mersBox[0];
             List<Map<String, Object>> sanitizedMers = mers.stream().map(mer -> {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("merchantId", mer.merchantId());
@@ -285,14 +190,14 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
             // return_rate
             final Object[] retBox = new Object[]{null};
             recordDbQuery("return_rate", () -> {
-                retBox[0] = jdbc.queryForObject(RETURN_RATE, ReturnRateRow.mapper(), userId);
+                retBox[0] = jdbc.queryForObject(RETURN_RATE, UserMemoryRow.ReturnRateRow.mapper(), userId);
             });
             pref.put("returnRate", orEmpty(retBox[0]));
 
             // payment_method
-            final List<PaymentMethodRow>[] payBox = new List[]{List.of()};
+            final List<UserMemoryRow.PaymentMethodRow>[] payBox = new List[]{List.of()};
             recordDbQuery("payment_method", () -> {
-                payBox[0] = jdbc.query(PAYMENT_METHOD, PaymentMethodRow.mapper(), userId);
+                payBox[0] = jdbc.query(PAYMENT_METHOD, UserMemoryRow.PaymentMethodRow.mapper(), userId);
             });
             pref.put("paymentMethodPref", payBox[0].stream()
                     .map(p -> Map.<String, Object>of("method",
@@ -300,9 +205,9 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
                     .collect(Collectors.toList()));
 
             // shipping_method
-            final List<ShippingMethodRow>[] shipBox = new List[]{List.of()};
+            final List<UserMemoryRow.ShippingMethodRow>[] shipBox = new List[]{List.of()};
             recordDbQuery("shipping_method", () -> {
-                shipBox[0] = jdbc.query(SHIPPING_METHOD, ShippingMethodRow.mapper(), userId);
+                shipBox[0] = jdbc.query(SHIPPING_METHOD, UserMemoryRow.ShippingMethodRow.mapper(), userId);
             });
             pref.put("shippingMethodPref", shipBox[0].stream()
                     .map(s -> Map.<String, Object>of("method",
@@ -310,12 +215,12 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
                     .collect(Collectors.toList()));
 
             // active_hours
-            final List<ActiveHoursRow>[] hoursBox = new List[]{List.of()};
+            final List<UserMemoryRow.ActiveHoursRow>[] hoursBox = new List[]{List.of()};
             recordDbQuery("active_hours", () -> {
-                hoursBox[0] = jdbc.query(ACTIVE_HOURS, ActiveHoursRow.mapper(), userId);
+                hoursBox[0] = jdbc.query(ACTIVE_HOURS, UserMemoryRow.ActiveHoursRow.mapper(), userId);
             });
             pref.put("activeHours", hoursBox[0].stream()
-                    .map(ActiveHoursRow::hour).collect(Collectors.toList()));
+                    .map(UserMemoryRow.ActiveHoursRow::hour).collect(Collectors.toList()));
 
             pref.put("preferredSizes", sanitizedCats.stream()
                     .map(c -> {
@@ -373,21 +278,12 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
             String truncated = renderer.truncate(fullText);
             // 截断后如果 text 变短,根据被丢 section 计数
             if (!truncated.equals(fullText)) {
-                if (!truncated.contains("## 偏好商家\n")) {
-                    meter.counter("ai_memory_overflow_drop_total",
-                            "field", "top_merchants").increment();
-                }
-                if (!truncated.contains("## 偏好尺码\n")) {
-                    meter.counter("ai_memory_overflow_drop_total",
-                            "field", "preferred_sizes").increment();
-                }
-                if (!truncated.contains("## 活跃时段\n")) {
-                    meter.counter("ai_memory_overflow_drop_total",
-                            "field", "active_hours").increment();
-                }
+                if (!truncated.contains("## 偏好商家\n")) metrics.recordOverflowDrop("top_merchants");
+                if (!truncated.contains("## 偏好尺码\n")) metrics.recordOverflowDrop("preferred_sizes");
+                if (!truncated.contains("## 活跃时段\n")) metrics.recordOverflowDrop("active_hours");
             }
             // B3 step10: 记录注入 prompt 的 token 数
-            injectionTokenSummary.record(PromptSectionRenderer.estimateTokens(truncated));
+            metrics.recordInjectionTokens(PromptSectionRenderer.estimateTokens(truncated));
             return truncated;
         } catch (Exception e) {
             log.error("[AI][MEMORY] render failed", e);
@@ -403,18 +299,6 @@ public class UserMemoryBuilder implements com.scutmmq.ai.service.UserMemoryBuild
 
     private static Object orEmpty(Object v) {
         return v == null ? Map.of() : v;
-    }
-
-    private static Double dbl(ResultSet rs, String col) {
-        try { return rs.getObject(col) == null ? null : rs.getDouble(col); } catch (Exception e) { return null; }
-    }
-
-    private static Long lng(ResultSet rs, String col) {
-        try { return rs.getObject(col) == null ? null : rs.getLong(col); } catch (Exception e) { return null; }
-    }
-
-    private static Integer intOrNull(ResultSet rs, String col) {
-        try { return rs.getObject(col) == null ? null : rs.getInt(col); } catch (Exception e) { return null; }
     }
 
     private static RowMapper<Map<String, Object>> userRowMapper() {

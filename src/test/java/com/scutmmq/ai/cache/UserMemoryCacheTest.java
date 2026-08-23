@@ -3,6 +3,7 @@ package com.scutmmq.ai.cache;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scutmmq.ai.cache.UserMemoryCache.CacheSnapshot;
 import com.scutmmq.ai.config.AiMemoryProperties;
+import com.scutmmq.ai.observability.UserMemoryMetrics;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,7 +46,7 @@ class UserMemoryCacheTest {
         mapper = new ObjectMapper();
         ops = mock(ValueOperations.class);
         when(redis.opsForValue()).thenReturn(ops);
-        cache = new UserMemoryCache(redis, props, mapper, new SimpleMeterRegistry());
+        cache = new UserMemoryCache(redis, props, mapper, new UserMemoryMetrics(new SimpleMeterRegistry()));
     }
 
     @Test

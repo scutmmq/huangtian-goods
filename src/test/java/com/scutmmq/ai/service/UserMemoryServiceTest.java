@@ -6,9 +6,9 @@ import com.scutmmq.ai.config.AiMemoryProperties;
 import com.scutmmq.ai.entity.TriggerReason;
 import com.scutmmq.ai.entity.UserMemoryEntity;
 import com.scutmmq.ai.mapper.UserMemoryMapper;
+import com.scutmmq.ai.observability.UserMemoryMetrics;
 import com.scutmmq.ai.security.PromptSanitizer;
 import com.scutmmq.utils.RedisConstants;
-import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -71,7 +71,7 @@ class UserMemoryServiceTest {
     private PromptSanitizer sanitizer;
     private AuditService auditService;
     private AiMemoryProperties props;
-    private MeterRegistry meter;
+    private UserMemoryMetrics metrics;
 
     /** 由测试控制的 Executor,记录被提交的 Runnable。 */
     private CapturingExecutor asyncExec;
@@ -99,10 +99,10 @@ class UserMemoryServiceTest {
         props.setRecomputeMaxFailCount(3);
 
         asyncExec = new CapturingExecutor();
-        meter = new SimpleMeterRegistry();
+        metrics = new UserMemoryMetrics(new SimpleMeterRegistry());
 
         service = new UserMemoryService(redis, mapper, builder, cache, sanitizer, auditService,
-                props, asyncExec, meter);
+                props, asyncExec, metrics);
 
         // 默认 mapper.selectById 返回 null,后续按需覆盖
         when(mapper.selectById(any())).thenReturn(null);
@@ -410,7 +410,7 @@ class UserMemoryServiceTest {
 
         // 用 mdcExec 重新构造 service,直接调 recomputeFor 验证子线程看到 traceId
         UserMemoryService mdcService = new UserMemoryService(
-                redis, mapper, builder, cache, sanitizer, auditService, props, mdcExec, meter);
+                redis, mapper, builder, cache, sanitizer, auditService, props, mdcExec, metrics);
 
         UserMemoryEntity existing = new UserMemoryEntity();
         existing.setUserId(7L);

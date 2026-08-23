@@ -1,5 +1,6 @@
 package com.scutmmq.ai.security;
 
+import com.scutmmq.ai.observability.UserMemoryMetrics;
 import com.scutmmq.ai.security.PromptSanitizer.FieldType;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
@@ -19,7 +20,7 @@ class PromptSanitizerTest {
 
     @BeforeEach
     void setUp() {
-        sanitizer = new PromptSanitizer(new SimpleMeterRegistry());
+        sanitizer = new PromptSanitizer(new UserMemoryMetrics(new SimpleMeterRegistry()));
     }
 
     @Test

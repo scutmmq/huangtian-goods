@@ -7,12 +7,9 @@ import com.scutmmq.ai.dto.UserMemoryOverviewVO;
 import com.scutmmq.ai.entity.TriggerReason;
 import com.scutmmq.ai.entity.UserMemoryEntity;
 import com.scutmmq.ai.mapper.UserMemoryMapper;
+import com.scutmmq.ai.observability.UserMemoryMetrics;
 import com.scutmmq.ai.security.PromptSanitizer;
 import com.scutmmq.utils.RedisConstants;
-import io.micrometer.core.instrument.Counter;
-import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.core.instrument.Tags;
-import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -26,34 +23,12 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * B3 step5: 用户长期记忆的协调层。
  *
- * <p>职责边界:
- * <ul>
- *   <li><b>防抖</b> {@link #scheduleRecompute} — Redis SETNX 做跨实例合并,
- *       Redis 不可用时降级为本地 Guava RateLimiter 风格的令牌桶</li>
- *   <li><b>重算</b> {@link #recomputeFor} — 调 Builder 算 identity + preference,
- *       列级 UPDATE(配合 @Version 校验);JSON 超 8KB 自动降级为 {}</li>
- *   <li><b>读路径</b> {@link #renderMemorySection} — cache → DB 顺序回源,
- *       空快照返回 ""(避免给空画像拼 prompt)</li>
- *   <li><b>GDPR 重置</b> {@link #reset} — 同步清空(同步部分 < 100ms),
- *       异步提交 {@link AuditService#purgeAuditAsync}</li>
- *   <li><b>GDPR 知情人概览</b> {@link #buildOverview} — 只返回元数据 + 字段清单,
- *       <b>不暴露</b>原始 JSON 画像内容</li>
- * </ul>
- *
- * <p>关键依赖:
- * <ul>
- *   <li>{@link UserMemoryMapper} — BaseMapper + 7 个列级 UPDATE 方法</li>
- *   <li>{@link UserMemoryBuilder} — Task 4 注入真实实现,本类只关心接口</li>
- *   <li>{@link UserMemoryCache} — HMAC key + Lua TOCTOU 防护</li>
- *   <li>{@code memoryAsyncExecutor} — 已在 AiTaskExecutorConfig 定义(core=1,max=2,queue=50),
- *       由 Task 9 implementer 加了 {@code @EnableAsync};{@link AuditService#purgeAuditAsync} 同池复用</li>
- * </ul>
+ * <p>{@link UserMemoryMetrics} 集中所有 ai_memory_* 埋点;{@link UserMemoryBuilder}
+ * 负责 SQL 聚合 / sanitize / 截断;{@link UserMemoryCache} 负责 HMAC + Lua TOCTOU。
  */
 @Slf4j
 @Service
@@ -62,29 +37,18 @@ public class UserMemoryService {
     /** 重算乐观锁冲突最多重试 1 次(2 次机会)。 */
     private static final int MAX_OPTIMISTIC_RETRY = 2;
 
-    /** 新用户没有任何画像时,render 返回该占位(空串)。 */
-    private static final String EMPTY_RENDER = "";
-
-    /** 兜底 RateLimiter:Redis Down 时使用本地令牌桶。 */
+    /** Redis Down 时使用本地令牌桶兜底。 */
     private final ConcurrentHashMap<Long, LocalTokenBucket> localLimiters = new ConcurrentHashMap<>();
-
-    /** B3 step10: DISABLED 用户数,绑到 ai_memory_fail_users gauge */
-    private final AtomicLong disabledUserCount = new AtomicLong();
 
     private final StringRedisTemplate redis;
     private final UserMemoryMapper mapper;
     private final UserMemoryBuilder builder;
     private final UserMemoryCache cache;
-    @SuppressWarnings("unused") // 注入以保持接口完整,后续 Task 6 事件里再用
-    private final PromptSanitizer sanitizer;
+    @SuppressWarnings("unused") private final PromptSanitizer sanitizer;
     private final AuditService auditService;
     private final AiMemoryProperties props;
     private final Executor asyncExecutor;
-    private final MeterRegistry meter;
-
-    /** B3 step10: 速率限流 accept/drop 计数器 */
-    private final Counter rateLimitAcceptCounter;
-    private final Counter rateLimitDropCounter;
+    private final UserMemoryMetrics metrics;
 
     public UserMemoryService(StringRedisTemplate redis,
                              UserMemoryMapper mapper,
@@ -94,7 +58,7 @@ public class UserMemoryService {
                              AuditService auditService,
                              AiMemoryProperties props,
                              @Qualifier("memoryAsyncExecutor") Executor asyncExecutor,
-                             MeterRegistry meter) {
+                             UserMemoryMetrics metrics) {
         this.redis = redis;
         this.mapper = mapper;
         this.builder = builder;
@@ -103,24 +67,11 @@ public class UserMemoryService {
         this.auditService = auditService;
         this.props = props;
         this.asyncExecutor = asyncExecutor;
-        this.meter = meter;
-        this.rateLimitAcceptCounter = Counter.builder("ai_memory_local_rate_limit_total")
-                .description("Redis Down 兜底 RateLimiter:accept 计数")
-                .tags(Tags.of("result", "accept"))
-                .register(meter);
-        this.rateLimitDropCounter = Counter.builder("ai_memory_local_rate_limit_total")
-                .description("Redis Down 兜底 RateLimiter:drop 计数")
-                .tags(Tags.of("result", "drop"))
-                .register(meter);
-        // B3 step10: DISABLED 用户 gauge
-        io.micrometer.core.instrument.Gauge.builder("ai_memory_fail_users", disabledUserCount,
-                        AtomicLong::doubleValue)
-                .description("recompute_status=DISABLED 的用户数(target < 50)")
-                .register(meter);
-        // 启动时刷新一次 — 不阻塞业务路径,异常吞掉走 0
+        this.metrics = metrics;
+        // 启动时刷新一次 DISABLED 用户计数(给 ai_memory_fail_users gauge 喂初值);不阻塞业务路径,异常吞掉走 0
         try {
             Long initial = mapper.countDisabledUsers();
-            if (initial != null) disabledUserCount.set(initial);
+            if (initial != null) metrics.setDisabledUserCount(initial);
         } catch (Exception e) {
             log.warn("[AI][MEMORY] initial disabledUserCount refresh failed reason={}", e.getMessage());
         }
@@ -128,10 +79,7 @@ public class UserMemoryService {
 
     // ============================ 防抖 ============================
 
-    /**
-     * 调度一次重算。Redis 可达时用 SETNX 做跨实例合并;Redis 抛异常降级到
-     * 本地令牌桶。返回 {@code true} 表示已成功提交(自己或别人在窗口内已合并则返 {@code false})。
-     */
+    /** Redis SETNX 跨实例合并;Redis 不可用降级到本地令牌桶。true=已提交,false=窗口内被合并。 */
     public boolean scheduleRecompute(Long userId, TriggerReason reason) {
         String key = RedisConstants.MEMORY_COALESCE_KEY_PREFIX + userId;
         try {
@@ -151,62 +99,38 @@ public class UserMemoryService {
         }
     }
 
-    /**
-     * 本地令牌桶兜底:每个用户独立桶,容量 = {@code localRateLimitBurst},
-     * 每秒补充 {@code localRateLimitPerUser} 个令牌。
-     * 桶满放行时记 {@code DEGRADED_RATE_LIMITED},桶空 DROP 记 {@code DEGRADED_RATE_LIMITED_DROP}。
-     */
+    /** 本地令牌桶兜底:每个用户独立桶,容量={@code localRateLimitBurst},每秒补 {@code localRateLimitPerUser}。accept / drop 写审计 + ai_memory_local_rate_limit_total{result}。 */
     private boolean scheduleWithLocalRateLimit(Long userId, TriggerReason reason) {
         LocalTokenBucket limiter = localLimiters.computeIfAbsent(userId, uid ->
                 new LocalTokenBucket(
                         Math.max(1, props.getLocalRateLimitBurst()),
                         Math.max(1, props.getLocalRateLimitPerUser())));
         if (limiter.tryAcquire()) {
-            rateLimitAcceptCounter.increment();
+            metrics.recordRateLimit(true);
             auditService.logDegraded(userId, "DEGRADED_RATE_LIMITED");
             asyncExecutor.execute(() -> recomputeFor(userId, reason));
             return true;
         }
-        rateLimitDropCounter.increment();
+        metrics.recordRateLimit(false);
         auditService.logDegraded(userId, "DEGRADED_RATE_LIMITED_DROP");
         return false;
     }
 
     // ============================ 重算 ============================
 
-    /**
-     * 重算某用户的记忆。整体在内存中跑完后落库 4 个写:
-     * computeIdentity → updateIdentity → computePreference → updatePreference → bumpComputeSeq。
-     * 失败 3 次(fail_count >= recomputeMaxFailCount)后 {@code recompute_status=0} 熔断,
-     * 后续 {@link #scheduleRecompute} 即使 SETNX 成功也走 DB 读路径跳过更新。
-     *
-     * <p>返回值:成功时返回最终 snapshot(供调用方继续使用),失败返回 null。
-     */
+    /** 重算某用户记忆:4 步写(DB@Version) + cache invalidate + audit;失败累加 fail_count,达到 {@code recomputeMaxFailCount} 熔断。成功返 snapshot,失败返 null。 */
     public UserMemorySnapshot recomputeFor(Long userId, TriggerReason reason) {
         long startNs = System.nanoTime();
         UserMemoryEntity entity = mapper.selectById(userId);
         int baseVersion = entity == null ? 0 : entity.getVersion();
-
         try {
             UserMemorySnapshot snap = doRecompute(userId, reason, entity, baseVersion);
-            recordRecomputeResult(userId, startNs, snap != null);
+            metrics.recordRecomputeResult(startNs, snap != null);
             return snap;
         } catch (Exception e) {
-            recordRecomputeResult(userId, startNs, false);
+            metrics.recordRecomputeResult(startNs, false);
             return handleRecomputeFailure(userId, e);
         }
-    }
-
-    /** B3 step10: 重算结束记 ai_memory_recompute_total{result} + ai_memory_recompute_duration_seconds summary */
-    private void recordRecomputeResult(Long userId, long startNs, boolean success) {
-        long elapsedMs = (System.nanoTime() - startNs) / 1_000_000L;
-        meter.counter("ai_memory_recompute_total", "result", success ? "success" : "failure")
-                .increment();
-        Timer.builder("ai_memory_recompute_duration_seconds")
-                .description("UserMemoryService.recomputeFor 耗时分布(纳秒转秒)")
-                .publishPercentiles(0.5, 0.95, 0.99)
-                .register(meter)
-                .record(elapsedMs, TimeUnit.MILLISECONDS);
     }
 
     private UserMemorySnapshot doRecompute(Long userId, TriggerReason reason,
@@ -214,8 +138,7 @@ public class UserMemoryService {
         Throwable lastEx = null;
         for (int attempt = 1; attempt <= MAX_OPTIMISTIC_RETRY; attempt++) {
             try {
-                return tryRecomputeOnce(userId, reason, entity,
-                        baseVersion + (attempt - 1) /* 每次重试 version 已在 db 中递增 */);
+                return tryRecomputeOnce(userId, reason, entity, baseVersion + (attempt - 1));
             } catch (DataIntegrityViolationException dive) {
                 return handleJsonOverflow(userId, entity, baseVersion, dive);
             } catch (OptimisticLockRetryException retry) {
@@ -224,11 +147,9 @@ public class UserMemoryService {
                         userId, attempt, MAX_OPTIMISTIC_RETRY);
             }
         }
-        // 用尽重试,记录失败 — lastEx 是 Throwable(cause),RuntimeException 构造签名不匹配,
-        // 改成不传 cause,只 log 原始 message
+        // 用尽重试 → 记 audit + fail_count++ + 阈值熔断(高竞争场景兜底)
         log.error("[AI][MEMORY] recompute exhausted retry userId={} lastReason={}",
                 userId, lastEx == null ? "null" : lastEx.getMessage());
-        // Bug 1 fix: 乐观锁耗尽 → fail_count++ + 检查熔断 + 记审计,高竞争场景有熔断
         auditService.logRecomputeFail(userId,
                 lastEx == null ? new RuntimeException("optimistic retry exhausted")
                         : new RuntimeException(lastEx.getMessage(), lastEx));
@@ -239,10 +160,9 @@ public class UserMemoryService {
                     && latest.getFailCount() >= props.getRecomputeMaxFailCount()) {
                 int marked = mapper.markDisabled(userId);
                 if (marked > 0) {
-                    disabledUserCount.incrementAndGet();
+                    metrics.incrementDisabledUserCount();
                 }
-                log.warn("[AI][MEMORY] recompute DISABLED userId={} after fail_count={}",
-                        userId, latest.getFailCount());
+                log.warn("[AI][MEMORY] recompute DISABLED userId={} after fail_count={}", userId, latest.getFailCount());
             }
         } catch (Exception nested) {
             log.warn("[AI][MEMORY] fail count update failed userId={} reason={}",
@@ -251,24 +171,18 @@ public class UserMemoryService {
         return null;
     }
 
-    /**
-     * 单次重算尝试。乐观锁冲突(0 行受影响)抛 {@link OptimisticLockRetryException} 让外层重试。
-     * 真正的 JSON OVERFLOW 抛 {@link DataIntegrityViolationException} 走降级。
-     */
+    /** 单次重算尝试。乐观锁冲突(rows=0)抛 {@link OptimisticLockRetryException} 让外层重试;JSON OVERFLOW 抛 {@link DataIntegrityViolationException} 走降级。 */
     private UserMemorySnapshot tryRecomputeOnce(Long userId, TriggerReason reason,
                                                 UserMemoryEntity entity, int expectedVersion) {
-        // 1. compute identity
         UserMemorySnapshot identitySnap = builder.computeIdentity(userId);
         String identityJson = identitySnap == null ? "{}" : identitySnap.identityJson();
 
-        // 2. write identity (with version check)
         int rowsIdentity = mapper.updateIdentity(userId, identityJson, expectedVersion);
         if (rowsIdentity == 0) {
             throw new OptimisticLockRetryException("updateIdentity rows=0");
         }
         int versionAfterIdentity = expectedVersion + 1;
 
-        // 3. compute preference
         UserMemorySnapshot prefSnap = builder.computePreference(userId);
         String prefJson = prefSnap == null ? "{}" : prefSnap.preferenceJson();
         int rowsPreference = mapper.updatePreference(userId, prefJson, versionAfterIdentity);
@@ -277,51 +191,37 @@ public class UserMemoryService {
         }
         int versionAfterPreference = versionAfterIdentity + 1;
 
-        // 4. bump compute_seq
         mapper.bumpComputeSeq(userId, versionAfterPreference);
-
-        // 5. invalidate cache
         cache.invalidate(userId);
-
-        // 6. audit
         auditService.logCompute(userId, reason.name());
 
         return new UserMemorySnapshot(identityJson, prefJson);
     }
 
-    /**
-     * 处理 JSON 超长触发 chk_identity_size / chk_preference_size 约束冲突:
-     * 把两个 JSON 都写成 {} 兜底,记一次 JSON_OVERFLOW 审计。
-     */
+    /** JSON 超长降级:把两个 JSON 都写成 {} 兜底,失效 cache,bump seq,记审计 + ai_memory_json_overflow_total。 */
     private UserMemorySnapshot handleJsonOverflow(Long userId, UserMemoryEntity entity,
                                                   int baseVersion,
                                                   DataIntegrityViolationException dive) {
         String field = dive.getMessage() != null && dive.getMessage().contains("identity") ? "identity" : "preference";
         auditService.logJsonOverflow(userId, field);
-        // B3 step10: 镜像 audit 到 Micrometer counter
-        meter.counter("ai_memory_json_overflow_total", "json", field).increment();
+        metrics.recordJsonOverflow(field);
         log.warn("[AI][MEMORY] JSON OVERFLOW userId={} field={} reason={}",
                 userId, field, dive.getMessage());
         int currentVersion = entity == null ? 0 : entity.getVersion();
         try {
             mapper.updateIdentity(userId, "{}", currentVersion);
             mapper.updatePreference(userId, "{}", currentVersion + 1);
-            // Bug 2 fix: 两个 JSON 都写空成功后,失效 cache,避免 60s 窗口内返回旧(已超 8KB)JSON
+            // 兜底成功后 invalidate cache + bump seq,避免 60s 窗口内返回旧(超 8KB)JSON
             cache.invalidate(userId);
-            // Bug 3 fix: bump compute_seq,确保其他 reader 用 dbSeq <= cachedSeq 比较能感知到新鲜度变化
             mapper.bumpComputeSeq(userId, currentVersion + 2);
         } catch (Exception ignore) {
-            // 兜底也失败 → 不阻塞,只 log
             log.warn("[AI][MEMORY] JSON OVERFLOW fallback write failed userId={} reason={}",
                     userId, ignore.getMessage());
         }
         return new UserMemorySnapshot("{}", "{}");
     }
 
-    /**
-     * 重算失败兜底:fail_count++,达到 {@code recomputeMaxFailCount} 熔断。
-     * 重算失败不抛 — 静默 log,避免阻塞主链路。
-     */
+    /** 重算失败兜底:fail_count++,达到 {@code recomputeMaxFailCount} 熔断。重算失败静默 log,不抛以避免阻塞主链路。 */
     private UserMemorySnapshot handleRecomputeFailure(Long userId, Exception e) {
         log.error("[AI][MEMORY] recompute failed userId={} reason={}", userId, e.getMessage());
         auditService.logRecomputeFail(userId, e);
@@ -332,82 +232,48 @@ public class UserMemoryService {
                     && latest.getFailCount() >= props.getRecomputeMaxFailCount()) {
                 int marked = mapper.markDisabled(userId);
                 if (marked > 0) {
-                    disabledUserCount.incrementAndGet();
+                    metrics.incrementDisabledUserCount();
                 }
-                log.warn("[AI][MEMORY] recompute DISABLED userId={} after fail_count={}",
-                        userId, latest.getFailCount());
+                log.warn("[AI][MEMORY] recompute DISABLED userId={} after fail_count={}", userId, latest.getFailCount());
             }
         } catch (Exception nested) {
-            log.warn("[AI][MEMORY] fail count update failed userId={} reason={}",
-                    userId, nested.getMessage());
+            log.warn("[AI][MEMORY] fail count update failed userId={} reason={}", userId, nested.getMessage());
         }
         return null;
     }
 
     // ============================ 渲染 ============================
 
-    /**
-     * 把当前用户记忆渲染成可注入 prompt 的 markdown 文本。
-     * <ol>
-     *   <li>cache hit 且 seq 仍新鲜 → 直接 render</li>
-     *   <li>cache hit 但 db.seq 更新 → 回源 DB</li>
-     *   <li>cache miss → 回源 DB</li>
-     *   <li>新用户(entity 为空)→ 返回 ""</li>
-     * </ol>
-     */
+    /** 渲染当前用户记忆为 markdown:cache hit + db.seq 新鲜 → 直 render;cache hit 但 db.seq 新 → read_stale 回源;cache miss → 回源;新用户 → 返 ""。 */
     public String renderMemorySection(Long userId) {
         Optional<CacheSnapshot> cached = cache.get(userId);
         UserMemorySnapshot snap;
-
         if (cached.isPresent()) {
             Long dbSeq = mapper.getComputeSeq(userId);
             if (dbSeq != null && dbSeq <= cached.get().computeSeq()) {
-                // seq 仍新鲜,直接用缓存
                 snap = new UserMemorySnapshot(cached.get().identityJson(), cached.get().preferenceJson());
             } else {
-                // seq 已过期,回源 DB + B3 step10: 记 read_stale(分桶)
                 long lag = dbSeq == null ? 0L : Math.max(0L, dbSeq - cached.get().computeSeq());
-                meter.counter("ai_memory_read_stale_total",
-                        "lag_seconds_bucket", bucketFor(lag)).increment();
+                metrics.recordReadStale(UserMemoryMetrics.lagBucket(lag));
                 snap = loadFromDbOrEmpty(userId, cached.get());
             }
         } else {
             snap = loadFromDbOrEmpty(userId, null);
         }
-
         String rendered = builder.renderForPrompt(snap);
-        // B3 step10: 新用户返空 → read_miss
         if (rendered.isEmpty()) {
-            meter.counter("ai_memory_read_miss_total").increment();
+            metrics.recordReadMiss();
         }
         return rendered;
     }
 
-    /**
-     * B3 step10: lag 分桶。主备延迟典型为 0-数秒级别;返回字符串 bucket。
-     * 实际是 compute_seq 差(每次重算 +1),不是真实秒数 — 但用于告警阈值仍有效。
-     */
-    private static String bucketFor(long lag) {
-        if (lag <= 1L) return "0-1";
-        if (lag <= 5L) return "2-5";
-        if (lag <= 30L) return "6-30";
-        if (lag <= 300L) return "31-300";
-        return "300+";
-    }
-
-    /**
-     * 从 DB 读取,写回 cache,然后返回 snapshot。
-     * 如果用户不存在(刚注册尚未生成画像)→ 返回全空 snapshot,后续 {@code renderForPrompt}
-     * 必须能正确处理空 snapshot 返回 ""。
-     */
+    /** 从 DB 读画像 → 写回 cache(setIfAbsentNewer) → 返 snapshot。用户不存在 → 返全空 snapshot。 */
     private UserMemorySnapshot loadFromDbOrEmpty(Long userId, CacheSnapshot fallback) {
         UserMemoryEntity e = mapper.selectById(userId);
         if (e == null) {
-            // 新用户
-            if (fallback != null) {
-                return new UserMemorySnapshot(fallback.identityJson(), fallback.preferenceJson());
-            }
-            return new UserMemorySnapshot("{}", "{}");
+            return fallback == null
+                    ? new UserMemorySnapshot("{}", "{}")
+                    : new UserMemorySnapshot(fallback.identityJson(), fallback.preferenceJson());
         }
         String identityJson = e.getIdentityJson() == null ? "{}" : e.getIdentityJson();
         String preferenceJson = e.getPreferenceJson() == null ? "{}" : e.getPreferenceJson();
@@ -415,23 +281,18 @@ public class UserMemoryService {
         Instant computed = e.getComputedAt() == null
                 ? Instant.now()
                 : e.getComputedAt().atZone(java.time.ZoneId.systemDefault()).toInstant();
-        cache.setIfAbsentNewer(userId,
-                new CacheSnapshot(identityJson, preferenceJson, seq, computed));
+        cache.setIfAbsentNewer(userId, new CacheSnapshot(identityJson, preferenceJson, seq, computed));
         return new UserMemorySnapshot(identityJson, preferenceJson);
     }
 
     // ============================ Reset ============================
 
-    /**
-     * GDPR Art 17 用户主动重置:把两个 JSON 字段清空(版 +1),清 cache,记审计,
-     * <b>同步</b>部分必须 < 100ms;异步清理 audit 表。
-     */
+    /** GDPR Art 17 主动重置:清 JSON + 版 +1,清 cache,记审计,异步清理 audit 表。同步部分必须 < 100ms。 */
     public boolean reset(Long userId) {
         try {
             mapper.resetMemory(userId);
         } catch (Exception e) {
-            log.warn("[AI][MEMORY] reset mapper update failed userId={} reason={}",
-                    userId, e.getMessage());
+            log.warn("[AI][MEMORY] reset mapper update failed userId={} reason={}", userId, e.getMessage());
         }
         cache.invalidate(userId);
         auditService.logReset(userId, null, null);
@@ -439,20 +300,13 @@ public class UserMemoryService {
         return true;
     }
 
-    // ============================ GDPR Art 15 ============================
-
-    /**
-     * GET /ai/memory:返回用户记忆的元数据 + 字段清单 + 数据用途声明。
-     * 不返回原始 JSON 画像内容,避免敏感偏好外泄。
-     */
+    /** GET /ai/memory:返回元数据 + 字段清单 + 数据用途声明。<b>不暴露</b>原始 JSON 画像内容,避免敏感偏好外泄。 */
     public UserMemoryOverviewVO buildOverview(Long userId) {
         UserMemoryEntity e = mapper.selectById(userId);
         if (e == null) {
-            return new UserMemoryOverviewVO(
-                    false, false, null, 0,
+            return new UserMemoryOverviewVO(false, false, null, 0,
                     "尚未生成记忆;首次对话后将自动建立。",
-                    List.of(),
-                    List.of(),
+                    List.of(), List.of(),
                     "AI 助手个性化推荐;不用于广告投放、不分享给第三方");
         }
         boolean hasIdentity = !"{}".equals(e.getIdentityJson());
@@ -460,9 +314,7 @@ public class UserMemoryService {
         Instant computedAt = e.getComputedAt() == null
                 ? Instant.now()
                 : e.getComputedAt().atZone(java.time.ZoneId.systemDefault()).toInstant();
-        return new UserMemoryOverviewVO(
-                hasIdentity, hasPreference,
-                computedAt,
+        return new UserMemoryOverviewVO(hasIdentity, hasPreference, computedAt,
                 e.getVersion() == null ? 0 : e.getVersion(),
                 "我们记住了你的基础资料和最近 90 天的购买偏好,用于个性化推荐。",
                 List.of("身份档案", "偏好画像"),
@@ -472,16 +324,13 @@ public class UserMemoryService {
 
     // ============================ 周期刷新 ============================
 
-    /**
-     * B3 step10: 每 5 分钟刷新一次 ai_memory_fail_users gauge(以 DB 为准,避免
-     * 进程内 AtomicLong 漂移)。{@code recompute_status=0} 的总行数。
-     */
+    /** 每 5 分钟刷新 ai_memory_fail_users gauge(以 DB 为准,避免进程内 AtomicLong 漂移)。{@code recompute_status=0} 的总行数。 */
     @Scheduled(fixedDelay = 5L * 60L * 1000L)
     public void refreshDisabledUserGauge() {
         try {
             Long count = mapper.countDisabledUsers();
             if (count != null) {
-                disabledUserCount.set(count);
+                metrics.setDisabledUserCount(count);
             }
         } catch (Exception e) {
             log.debug("[AI][MEMORY] refreshDisabledUserGauge skipped reason={}", e.getMessage());
@@ -490,9 +339,7 @@ public class UserMemoryService {
 
     // ============================ 内部类 ============================
 
-    /**
-     * 内部乐观锁冲突标记 — 让外层 tryRecomputeOnce 区分"重试 vs 真异常"。
-     */
+    /** 内部乐观锁冲突标记 — 让外层 tryRecomputeOnce 区分"重试 vs 真异常"。 */
     private static class OptimisticLockRetryException extends RuntimeException {
         OptimisticLockRetryException(String msg) {
             super(msg);
