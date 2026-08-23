@@ -173,6 +173,23 @@ public class UserMemoryService {
         // 改成不传 cause,只 log 原始 message
         log.error("[AI][MEMORY] recompute exhausted retry userId={} lastReason={}",
                 userId, lastEx == null ? "null" : lastEx.getMessage());
+        // Bug 1 fix: 乐观锁耗尽 → fail_count++ + 检查熔断 + 记审计,高竞争场景有熔断
+        auditService.logRecomputeFail(userId,
+                lastEx == null ? new RuntimeException("optimistic retry exhausted")
+                        : new RuntimeException(lastEx.getMessage(), lastEx));
+        try {
+            mapper.incrementFailCount(userId);
+            UserMemoryEntity latest = mapper.selectById(userId);
+            if (latest != null && latest.getFailCount() != null
+                    && latest.getFailCount() >= props.getRecomputeMaxFailCount()) {
+                mapper.markDisabled(userId);
+                log.warn("[AI][MEMORY] recompute DISABLED userId={} after fail_count={}",
+                        userId, latest.getFailCount());
+            }
+        } catch (Exception nested) {
+            log.warn("[AI][MEMORY] fail count update failed userId={} reason={}",
+                    userId, nested.getMessage());
+        }
         return null;
     }
 
@@ -229,6 +246,10 @@ public class UserMemoryService {
         try {
             mapper.updateIdentity(userId, "{}", currentVersion);
             mapper.updatePreference(userId, "{}", currentVersion + 1);
+            // Bug 2 fix: 两个 JSON 都写空成功后,失效 cache,避免 60s 窗口内返回旧(已超 8KB)JSON
+            cache.invalidate(userId);
+            // Bug 3 fix: bump compute_seq,确保其他 reader 用 dbSeq <= cachedSeq 比较能感知到新鲜度变化
+            mapper.bumpComputeSeq(userId, currentVersion + 2);
         } catch (Exception ignore) {
             // 兜底也失败 → 不阻塞,只 log
             log.warn("[AI][MEMORY] JSON OVERFLOW fallback write failed userId={} reason={}",

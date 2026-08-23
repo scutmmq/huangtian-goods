@@ -314,6 +314,72 @@ class UserMemoryServiceTest {
         verify(builder, atLeastOnce()).computeIdentity(7L);
     }
 
+    // ============================== 乐观锁耗尽 (1) ==============================
+
+    @Test
+    void optimisticLockExhaustedIncrementsFailCount() {
+        UserMemoryEntity existing = new UserMemoryEntity();
+        existing.setUserId(7L);
+        existing.setIdentityJson("{}");
+        existing.setPreferenceJson("{}");
+        existing.setVersion(1);
+        existing.setFailCount(0);
+        when(mapper.selectById(7L)).thenReturn(existing);
+        when(builder.computeIdentity(7L)).thenReturn(new UserMemorySnapshot("{}", "{}"));
+        when(builder.computePreference(7L)).thenReturn(new UserMemorySnapshot("{}", "{}"));
+
+        // MAX_OPTIMISTIC_RETRY=2 → 两次 updateIdentity 都返回 0 行,触发 OptimisticLockRetryException 耗尽
+        when(mapper.updateIdentity(eq(7L), anyString(), anyInt())).thenReturn(0);
+
+        // mock incrementFailCount 后的 selectById 返回 fail_count 达到阈值(3)
+        UserMemoryEntity afterIncrement = new UserMemoryEntity();
+        afterIncrement.setUserId(7L);
+        afterIncrement.setFailCount(3);
+        when(mapper.selectById(7L))
+                .thenReturn(existing)   // 第一次 selectById(进入重算前)
+                .thenReturn(afterIncrement);  // 第二次 selectById(检查熔断时)
+
+        service.recomputeFor(7L, TriggerReason.TRIGGER_ORDER);
+
+        // 必须调 incrementFailCount
+        verify(mapper, times(1)).incrementFailCount(eq(7L));
+        // 达到阈值后必须调 markDisabled
+        verify(mapper, times(1)).markDisabled(eq(7L));
+        // 必须记一条审计
+        verify(auditService, times(1)).logRecomputeFail(eq(7L), any(Exception.class));
+    }
+
+    // ============================== JSON OVERFLOW 降级 (1) ==============================
+
+    @Test
+    void jsonOverflowFallsBackAndInvalidatesCache() {
+        UserMemoryEntity existing = new UserMemoryEntity();
+        existing.setUserId(7L);
+        existing.setIdentityJson("{}");
+        existing.setPreferenceJson("{}");
+        existing.setVersion(2);
+        existing.setFailCount(0);
+        when(mapper.selectById(7L)).thenReturn(existing);
+
+        // 第一次 updateIdentity 触发 chk_identity_size 约束冲突
+        when(mapper.updateIdentity(eq(7L), eq("{\"too big\"}"), anyInt()))
+                .thenThrow(new DataIntegrityViolationException(
+                        "chk_identity_size: OCTET_LENGTH > 8192"));
+        // 降级路径:两个 updateIdentity/updatePreference 都返 1
+        when(mapper.updateIdentity(eq(7L), eq("{}"), anyInt())).thenReturn(1);
+        when(mapper.updatePreference(eq(7L), eq("{}"), anyInt())).thenReturn(1);
+
+        when(builder.computeIdentity(7L)).thenReturn(new UserMemorySnapshot("{\"too big\"}", "{}"));
+        when(builder.computePreference(7L)).thenReturn(new UserMemorySnapshot("{}", "{}"));
+
+        service.recomputeFor(7L, TriggerReason.TRIGGER_ORDER);
+
+        // Bug 2: cache.invalidate 必须被调
+        verify(cache, times(1)).invalidate(eq(7L));
+        // Bug 3: bumpComputeSeq 必须被调(版本=currentVersion+2=4)
+        verify(mapper, times(1)).bumpComputeSeq(eq(7L), eq(4));
+    }
+
     // ============================== MDC (1) ==============================
 
     @Test
