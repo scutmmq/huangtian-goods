@@ -7,6 +7,8 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
+import java.util.List;
+
 /**
  * B3 step5: 用户长期记忆主表 mapper。
  *
@@ -62,4 +64,36 @@ public interface UserMemoryMapper extends BaseMapper<UserMemoryEntity> {
 
     @Select("SELECT compute_seq FROM ai_user_memory WHERE user_id=#{userId}")
     Long getComputeSeq(@Param("userId") Long userId);
+
+    /**
+     * B3 step7: cron 游标扫描 — 找"陈旧且需重算"的用户 ID(见 spec §3.5,NOT EXISTS 避免 N+1)。
+     *
+     * <p>过滤条件:
+     * <ul>
+     *   <li>{@code recompute_status=1} — 未熔断</li>
+     *   <li>{@code computed_at < cutoff} — 7 天内未被重算过</li>
+     *   <li>{@code user_id > lastUserId} — 游标分批,保证不重复不漏扫</li>
+     *   <li>{@code NOT EXISTS ... action='RESET' ...} — DSR-excluded 用户跳过
+     *       (在 retention 天内主动 reset 过的不重算,避免画像污染)</li>
+     * </ul>
+     *
+     * @param lastUserId  上一批最后一个 user_id(首次传 0)
+     * @param cutoffSeconds 阈值秒(epoch seconds),{@code computed_at < FROM_UNIXTIME(cutoffSeconds)}
+     * @param batchSize  本批上限(LIMIT)
+     */
+    @Select("SELECT user_id FROM ai_user_memory m "
+            + "WHERE m.recompute_status = 1 "
+            + "AND m.computed_at < FROM_UNIXTIME(#{cutoffSeconds}) "
+            + "AND m.user_id > #{lastUserId} "
+            + "AND NOT EXISTS ( "
+            + "  SELECT 1 FROM ai_user_memory_audit a "
+            + "  WHERE a.user_id = m.user_id AND a.action = 'RESET' "
+            + "  AND a.created_at > DATE_SUB(NOW(), INTERVAL #{resetRetentionDays} DAY) "
+            + ") "
+            + "ORDER BY m.user_id "
+            + "LIMIT #{batchSize}")
+    List<Long> findStaleUserIds(@Param("lastUserId") long lastUserId,
+                                @Param("cutoffSeconds") long cutoffSeconds,
+                                @Param("resetRetentionDays") int resetRetentionDays,
+                                @Param("batchSize") int batchSize);
 }
