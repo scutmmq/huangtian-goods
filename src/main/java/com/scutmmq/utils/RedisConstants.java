@@ -40,4 +40,10 @@ public class RedisConstants {
     public static final String NOTIFY_USER_STREAM_PREFIX = "notify:user:";
     public static final String NOTIFY_MERCHANT_STREAM_PREFIX = "notify:merchant:";
     public static final String CACHE_ADDRESS_KEY = "cache:address:";
+
+    // B3 AI 长期记忆
+    public static final String MEMORY_CACHE_KEY_PREFIX = "ai:memory:";            // + userId
+    public static final String MEMORY_COALESCE_KEY_PREFIX = "memory:coalesce:";   // + userId,写合并短窗口去重
+    public static final String MEMORY_CRON_LOCK_KEY = "lock:memory:recompute:cron";
+    public static final String MEMORY_PARTITION_DROP_LOCK_KEY = "lock:memory:partition:drop";
 }
