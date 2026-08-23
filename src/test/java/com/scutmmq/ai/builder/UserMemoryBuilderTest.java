@@ -7,6 +7,7 @@ import com.scutmmq.ai.security.PromptInjectionException;
 import com.scutmmq.ai.security.PromptSanitizer;
 import com.scutmmq.ai.service.AuditService;
 import com.scutmmq.ai.service.UserMemorySnapshot;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -61,7 +62,7 @@ class UserMemoryBuilderTest {
         jdbc = mock(JdbcTemplate.class);
         mapper = mock(UserMemoryMapper.class);
         // 真实 sanitizer:覆盖 DENY/SAFE_NAME/JSON escape 三层行为
-        sanitizer = new PromptSanitizer();
+        sanitizer = new PromptSanitizer(new SimpleMeterRegistry());
         auditService = mock(AuditService.class);
         props = new AiMemoryProperties();
         props.setCacheHmacSecrets("v1:abcdefghijklmnopqrstuvwxyz12345678");
@@ -74,7 +75,8 @@ class UserMemoryBuilderTest {
         when(jdbc.query(anyString(), any(RowMapper.class), any())).thenReturn(List.of());
 
         PromptSectionRenderer renderer = new PromptSectionRenderer(props);
-        builder = new UserMemoryBuilder(jdbc, mapper, sanitizer, json, auditService, renderer);
+        builder = new UserMemoryBuilder(jdbc, mapper, sanitizer, json, auditService, renderer,
+                new SimpleMeterRegistry());
     }
 
     // ============================ 7 条 SQL 关键字(8) ============================

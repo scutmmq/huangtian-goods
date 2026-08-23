@@ -3,7 +3,8 @@ package com.scutmmq.ai.controller;
 import com.scutmmq.ai.service.UserMemoryService;
 import com.scutmmq.entity.Result;
 import com.scutmmq.utils.UserHolder;
-import lombok.RequiredArgsConstructor;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.util.Assert;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -23,11 +24,20 @@ import org.springframework.web.bind.annotation.RestController;
 @Slf4j
 @RestController
 @RequestMapping("/ai/memory")
-@RequiredArgsConstructor
 public class MemoryResetController {
 
     private final UserMemoryService service;
     private final UserHolder userHolder;
+    /** B3 step10: 每次 reset 调用计数 — {@code ai_memory_reset_total} */
+    private final Counter resetCounter;
+
+    public MemoryResetController(UserMemoryService service, UserHolder userHolder, MeterRegistry meter) {
+        this.service = service;
+        this.userHolder = userHolder;
+        this.resetCounter = Counter.builder("ai_memory_reset_total")
+                .description("POST /ai/memory/reset 调用次数")
+                .register(meter);
+    }
 
     @PostMapping("/reset")
     public Result reset() {
@@ -35,6 +45,7 @@ public class MemoryResetController {
         Assert.isTrue(userId != null, "userId must not be null");
         log.info("[AI][CTRL] POST /ai/memory/reset userId={}", userId);
         service.reset(userId);
+        resetCounter.increment();
         return Result.success(null);
     }
 }

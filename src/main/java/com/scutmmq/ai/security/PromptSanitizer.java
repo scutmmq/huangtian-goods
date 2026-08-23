@@ -1,5 +1,7 @@
 package com.scutmmq.ai.security;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -36,6 +38,15 @@ public class PromptSanitizer {
     private static final Pattern SAFE_NAME = Pattern.compile(
             "^[一-龥a-zA-Z0-9\\s\\-_()&（）【】]{1,32}$");
 
+    /** B3 step10: 黑名单命中计数器;{@code ai_memory_prompt_injection_drop_total} */
+    private final Counter promptInjectionDropCounter;
+
+    public PromptSanitizer(MeterRegistry meterRegistry) {
+        this.promptInjectionDropCounter = Counter.builder("ai_memory_prompt_injection_drop_total")
+                .description("PromptSanitizer DENY_LIST 命中次数 — 命中即抛 PromptInjectionException")
+                .register(meterRegistry);
+    }
+
     /**
      * 清洗一段用户/外部输入,供 LLM prompt 拼接使用。
      *
@@ -49,6 +60,7 @@ public class PromptSanitizer {
         if (raw == null || raw.isEmpty()) return "";
         for (Pattern p : DENY_LIST) {
             if (p.matcher(raw).find()) {
+                promptInjectionDropCounter.increment();
                 throw new PromptInjectionException(
                         "Deny-list match: " + p.pattern() + " input=" + raw);
             }

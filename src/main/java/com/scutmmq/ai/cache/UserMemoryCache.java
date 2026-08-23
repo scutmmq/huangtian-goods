@@ -4,6 +4,9 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scutmmq.ai.config.AiMemoryProperties;
 import com.scutmmq.utils.RedisConstants;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -15,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * B3 step2: 用户长期记忆的 Redis 缓存。
@@ -48,12 +52,39 @@ public class UserMemoryCache {
     private final AiMemoryProperties props;
     private final ObjectMapper mapper;
 
-    public UserMemoryCache(StringRedisTemplate redis, AiMemoryProperties props, ObjectMapper mapper) {
+    /** B3 step10: 缓存 hit / miss 计数器,用于计算 ai_memory_cache_hit_ratio gauge */
+    private final AtomicLong hitCount = new AtomicLong();
+    private final AtomicLong missCount = new AtomicLong();
+
+    /** B3 step10: 缓存失败计数器 — {@code ai_memory_cache_failure_total} */
+    private final Counter cacheFailureCounter;
+    /** B3 step10: 突增 miss 计数器(每次 miss 都计,外部按 5x baseline 告警)— {@code ai_memory_cache_miss_burst_total} */
+    private final Counter cacheMissBurstCounter;
+
+    public UserMemoryCache(StringRedisTemplate redis, AiMemoryProperties props, ObjectMapper mapper,
+                           MeterRegistry meterRegistry) {
         this.redis = redis;
         this.props = props;
         // 用类加载器发现并注册 JavaTimeModule 支持 Instant;对 Spring Boot 自动注入的 ObjectMapper 也是幂等的。
         mapper.findAndRegisterModules();
         this.mapper = mapper;
+        this.cacheFailureCounter = Counter.builder("ai_memory_cache_failure_total")
+                .description("缓存 get 失败次数(Redis 连接异常)")
+                .register(meterRegistry);
+        this.cacheMissBurstCounter = Counter.builder("ai_memory_cache_miss_burst_total")
+                .description("缓存 miss 突增计数(主从切换瞬断检测,>5x baseline 告警)")
+                .register(meterRegistry);
+        Gauge.builder("ai_memory_cache_hit_ratio", this, UserMemoryCache::computeHitRatio)
+                .description("缓存命中率 gauge(target > 0.80)")
+                .register(meterRegistry);
+    }
+
+    /** 命中率 = hits / (hits + misses);分母为 0 时返 0.0 避免 NaN。 */
+    private double computeHitRatio() {
+        long hits = hitCount.get();
+        long misses = missCount.get();
+        long total = hits + misses;
+        return total == 0L ? 0.0 : (double) hits / (double) total;
     }
 
     public record CacheSnapshot(
@@ -83,8 +114,16 @@ public class UserMemoryCache {
     public Optional<CacheSnapshot> get(Long userId) {
         try {
             String raw = redis.opsForValue().get(hmacKey(userId));
-            return raw == null ? Optional.empty() : Optional.of(deserialize(raw));
+            if (raw == null) {
+                missCount.incrementAndGet();
+                cacheMissBurstCounter.increment();
+                return Optional.empty();
+            }
+            hitCount.incrementAndGet();
+            return Optional.of(deserialize(raw));
         } catch (Exception e) {
+            cacheFailureCounter.increment();
+            missCount.incrementAndGet();
             log.warn("[AI][MEMORY] redis get failed userId={} reason={}", userId, e.getMessage());
             return Optional.empty();
         }

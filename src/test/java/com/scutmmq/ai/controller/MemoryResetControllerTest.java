@@ -4,6 +4,7 @@ import com.scutmmq.dto.UserDTO;
 import com.scutmmq.entity.Result;
 import com.scutmmq.ai.service.UserMemoryService;
 import com.scutmmq.utils.UserHolder;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -35,7 +36,7 @@ class MemoryResetControllerTest {
     void setUp() {
         service = mock(UserMemoryService.class);
         // UserHolder 是 static 工具类,这里 new 一个实例只是为了满足构造签名
-        controller = new MemoryResetController(service, new UserHolder());
+        controller = new MemoryResetController(service, new UserHolder(), new SimpleMeterRegistry());
         // ThreadLocal 准备:把当前线程的 user 设为 42L
         UserDTO user = new UserDTO();
         user.setId(42L);

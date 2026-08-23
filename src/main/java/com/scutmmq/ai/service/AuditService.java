@@ -3,7 +3,8 @@ package com.scutmmq.ai.service;
 import com.scutmmq.ai.config.AiMemoryProperties;
 import com.scutmmq.ai.entity.UserMemoryAuditEntity;
 import com.scutmmq.ai.mapper.UserMemoryAuditMapper;
-import lombok.RequiredArgsConstructor;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Async;
@@ -26,7 +27,6 @@ import org.springframework.stereotype.Service;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class AuditService {
 
     /** 每次 UPDATE 的批大小(行数),与 limiter.rate 配合决定批间隔。 */
@@ -38,10 +38,35 @@ public class AuditService {
     private final JdbcTemplate jdbc;
     private final UserMemoryAuditMapper auditMapper;
     private final AiMemoryProperties props;
+    private final MeterRegistry meter;
+
+    /** B3 step10: audit 写失败计数 — {@code ai_memory_audit_write_failure_total} */
+    private final Counter auditWriteFailureCounter;
+    /** B3 step10: 异步清理行数计数 — {@code ai_memory_audit_purged_total} */
+    private final Counter auditPurgedCounter;
+    /** B3 step10: DLQ 入表计数 — {@code ai_memory_audit_purge_dlq_total} */
+    private final Counter auditPurgeDlqCounter;
 
     /** Rate gate 状态:上一次 batch 的 nanoTime,0 表示尚未初始化(首次调用立即放行并设为 now)。 */
     private long lastBatchNanos = 0L;
     private final Object rateLock = new Object();
+
+    public AuditService(JdbcTemplate jdbc, UserMemoryAuditMapper auditMapper,
+                        AiMemoryProperties props, MeterRegistry meter) {
+        this.jdbc = jdbc;
+        this.auditMapper = auditMapper;
+        this.props = props;
+        this.meter = meter;
+        this.auditWriteFailureCounter = Counter.builder("ai_memory_audit_write_failure_total")
+                .description("audit log 写入失败次数")
+                .register(meter);
+        this.auditPurgedCounter = Counter.builder("ai_memory_audit_purged_total")
+                .description("异步 purge 清理行数累计")
+                .register(meter);
+        this.auditPurgeDlqCounter = Counter.builder("ai_memory_audit_purge_dlq_total")
+                .description("purge 失败入 DLQ 表次数")
+                .register(meter);
+    }
 
     // ============================ 同步 log(主流程)============================
 
@@ -105,6 +130,8 @@ public class AuditService {
                                     + "LIMIT " + PURGE_BATCH_SIZE,
                             userId);
                 }
+                // B3 step10: 成功路径累计 purge 行数
+                auditPurgedCounter.increment(total);
                 return;
             } catch (Exception e) {
                 retry++;
@@ -135,6 +162,7 @@ public class AuditService {
             auditMapper.insert(e);
         } catch (Exception ex) {
             // 审计写入失败仅 log,不阻塞 AI 主链路
+            auditWriteFailureCounter.increment();
             log.warn("[AI][AUDIT] insert failed userId={} action={} reason={}",
                     userId, action, ex.getMessage());
         }
@@ -146,6 +174,8 @@ public class AuditService {
                     "INSERT INTO ai_user_memory_audit_purge_dlq (user_id, error_msg, retry_count) "
                             + "VALUES (?, ?, ?)",
                     userId, truncate(errorMsg, 4000), retryCount);
+            // B3 step10: DLQ 入表计数(成功路径才计)
+            auditPurgeDlqCounter.increment();
         } catch (Exception e) {
             log.error("[AI][AUDIT] DLQ insert failed userId={} reason={}", userId, e.getMessage());
         }

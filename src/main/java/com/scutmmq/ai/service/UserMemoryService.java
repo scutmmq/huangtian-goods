@@ -9,10 +9,15 @@ import com.scutmmq.ai.entity.UserMemoryEntity;
 import com.scutmmq.ai.mapper.UserMemoryMapper;
 import com.scutmmq.ai.security.PromptSanitizer;
 import com.scutmmq.utils.RedisConstants;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tags;
+import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -21,6 +26,8 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * B3 step5: 用户长期记忆的协调层。
@@ -61,6 +68,9 @@ public class UserMemoryService {
     /** 兜底 RateLimiter:Redis Down 时使用本地令牌桶。 */
     private final ConcurrentHashMap<Long, LocalTokenBucket> localLimiters = new ConcurrentHashMap<>();
 
+    /** B3 step10: DISABLED 用户数,绑到 ai_memory_fail_users gauge */
+    private final AtomicLong disabledUserCount = new AtomicLong();
+
     private final StringRedisTemplate redis;
     private final UserMemoryMapper mapper;
     private final UserMemoryBuilder builder;
@@ -70,6 +80,11 @@ public class UserMemoryService {
     private final AuditService auditService;
     private final AiMemoryProperties props;
     private final Executor asyncExecutor;
+    private final MeterRegistry meter;
+
+    /** B3 step10: 速率限流 accept/drop 计数器 */
+    private final Counter rateLimitAcceptCounter;
+    private final Counter rateLimitDropCounter;
 
     public UserMemoryService(StringRedisTemplate redis,
                              UserMemoryMapper mapper,
@@ -78,7 +93,8 @@ public class UserMemoryService {
                              PromptSanitizer sanitizer,
                              AuditService auditService,
                              AiMemoryProperties props,
-                             @Qualifier("memoryAsyncExecutor") Executor asyncExecutor) {
+                             @Qualifier("memoryAsyncExecutor") Executor asyncExecutor,
+                             MeterRegistry meter) {
         this.redis = redis;
         this.mapper = mapper;
         this.builder = builder;
@@ -87,6 +103,27 @@ public class UserMemoryService {
         this.auditService = auditService;
         this.props = props;
         this.asyncExecutor = asyncExecutor;
+        this.meter = meter;
+        this.rateLimitAcceptCounter = Counter.builder("ai_memory_local_rate_limit_total")
+                .description("Redis Down 兜底 RateLimiter:accept 计数")
+                .tags(Tags.of("result", "accept"))
+                .register(meter);
+        this.rateLimitDropCounter = Counter.builder("ai_memory_local_rate_limit_total")
+                .description("Redis Down 兜底 RateLimiter:drop 计数")
+                .tags(Tags.of("result", "drop"))
+                .register(meter);
+        // B3 step10: DISABLED 用户 gauge
+        io.micrometer.core.instrument.Gauge.builder("ai_memory_fail_users", disabledUserCount,
+                        AtomicLong::doubleValue)
+                .description("recompute_status=DISABLED 的用户数(target < 50)")
+                .register(meter);
+        // 启动时刷新一次 — 不阻塞业务路径,异常吞掉走 0
+        try {
+            Long initial = mapper.countDisabledUsers();
+            if (initial != null) disabledUserCount.set(initial);
+        } catch (Exception e) {
+            log.warn("[AI][MEMORY] initial disabledUserCount refresh failed reason={}", e.getMessage());
+        }
     }
 
     // ============================ 防抖 ============================
@@ -125,10 +162,12 @@ public class UserMemoryService {
                         Math.max(1, props.getLocalRateLimitBurst()),
                         Math.max(1, props.getLocalRateLimitPerUser())));
         if (limiter.tryAcquire()) {
+            rateLimitAcceptCounter.increment();
             auditService.logDegraded(userId, "DEGRADED_RATE_LIMITED");
             asyncExecutor.execute(() -> recomputeFor(userId, reason));
             return true;
         }
+        rateLimitDropCounter.increment();
         auditService.logDegraded(userId, "DEGRADED_RATE_LIMITED_DROP");
         return false;
     }
@@ -144,14 +183,30 @@ public class UserMemoryService {
      * <p>返回值:成功时返回最终 snapshot(供调用方继续使用),失败返回 null。
      */
     public UserMemorySnapshot recomputeFor(Long userId, TriggerReason reason) {
+        long startNs = System.nanoTime();
         UserMemoryEntity entity = mapper.selectById(userId);
         int baseVersion = entity == null ? 0 : entity.getVersion();
 
         try {
-            return doRecompute(userId, reason, entity, baseVersion);
+            UserMemorySnapshot snap = doRecompute(userId, reason, entity, baseVersion);
+            recordRecomputeResult(userId, startNs, snap != null);
+            return snap;
         } catch (Exception e) {
+            recordRecomputeResult(userId, startNs, false);
             return handleRecomputeFailure(userId, e);
         }
+    }
+
+    /** B3 step10: 重算结束记 ai_memory_recompute_total{result} + ai_memory_recompute_duration_seconds summary */
+    private void recordRecomputeResult(Long userId, long startNs, boolean success) {
+        long elapsedMs = (System.nanoTime() - startNs) / 1_000_000L;
+        meter.counter("ai_memory_recompute_total", "result", success ? "success" : "failure")
+                .increment();
+        Timer.builder("ai_memory_recompute_duration_seconds")
+                .description("UserMemoryService.recomputeFor 耗时分布(纳秒转秒)")
+                .publishPercentiles(0.5, 0.95, 0.99)
+                .register(meter)
+                .record(elapsedMs, TimeUnit.MILLISECONDS);
     }
 
     private UserMemorySnapshot doRecompute(Long userId, TriggerReason reason,
@@ -182,7 +237,10 @@ public class UserMemoryService {
             UserMemoryEntity latest = mapper.selectById(userId);
             if (latest != null && latest.getFailCount() != null
                     && latest.getFailCount() >= props.getRecomputeMaxFailCount()) {
-                mapper.markDisabled(userId);
+                int marked = mapper.markDisabled(userId);
+                if (marked > 0) {
+                    disabledUserCount.incrementAndGet();
+                }
                 log.warn("[AI][MEMORY] recompute DISABLED userId={} after fail_count={}",
                         userId, latest.getFailCount());
             }
@@ -240,6 +298,8 @@ public class UserMemoryService {
                                                   DataIntegrityViolationException dive) {
         String field = dive.getMessage() != null && dive.getMessage().contains("identity") ? "identity" : "preference";
         auditService.logJsonOverflow(userId, field);
+        // B3 step10: 镜像 audit 到 Micrometer counter
+        meter.counter("ai_memory_json_overflow_total", "json", field).increment();
         log.warn("[AI][MEMORY] JSON OVERFLOW userId={} field={} reason={}",
                 userId, field, dive.getMessage());
         int currentVersion = entity == null ? 0 : entity.getVersion();
@@ -270,7 +330,10 @@ public class UserMemoryService {
             UserMemoryEntity latest = mapper.selectById(userId);
             if (latest != null && latest.getFailCount() != null
                     && latest.getFailCount() >= props.getRecomputeMaxFailCount()) {
-                mapper.markDisabled(userId);
+                int marked = mapper.markDisabled(userId);
+                if (marked > 0) {
+                    disabledUserCount.incrementAndGet();
+                }
                 log.warn("[AI][MEMORY] recompute DISABLED userId={} after fail_count={}",
                         userId, latest.getFailCount());
             }
@@ -302,14 +365,34 @@ public class UserMemoryService {
                 // seq 仍新鲜,直接用缓存
                 snap = new UserMemorySnapshot(cached.get().identityJson(), cached.get().preferenceJson());
             } else {
-                // seq 已过期,回源 DB
+                // seq 已过期,回源 DB + B3 step10: 记 read_stale(分桶)
+                long lag = dbSeq == null ? 0L : Math.max(0L, dbSeq - cached.get().computeSeq());
+                meter.counter("ai_memory_read_stale_total",
+                        "lag_seconds_bucket", bucketFor(lag)).increment();
                 snap = loadFromDbOrEmpty(userId, cached.get());
             }
         } else {
             snap = loadFromDbOrEmpty(userId, null);
         }
 
-        return builder.renderForPrompt(snap);
+        String rendered = builder.renderForPrompt(snap);
+        // B3 step10: 新用户返空 → read_miss
+        if (rendered.isEmpty()) {
+            meter.counter("ai_memory_read_miss_total").increment();
+        }
+        return rendered;
+    }
+
+    /**
+     * B3 step10: lag 分桶。主备延迟典型为 0-数秒级别;返回字符串 bucket。
+     * 实际是 compute_seq 差(每次重算 +1),不是真实秒数 — 但用于告警阈值仍有效。
+     */
+    private static String bucketFor(long lag) {
+        if (lag <= 1L) return "0-1";
+        if (lag <= 5L) return "2-5";
+        if (lag <= 30L) return "6-30";
+        if (lag <= 300L) return "31-300";
+        return "300+";
     }
 
     /**
@@ -385,6 +468,24 @@ public class UserMemoryService {
                 List.of("身份档案", "偏好画像"),
                 List.of("默认地址", "账号年龄", "价格区间", "偏好类目", "偏好商家", "退货率"),
                 "AI 助手个性化推荐;不用于广告投放、不分享给第三方");
+    }
+
+    // ============================ 周期刷新 ============================
+
+    /**
+     * B3 step10: 每 5 分钟刷新一次 ai_memory_fail_users gauge(以 DB 为准,避免
+     * 进程内 AtomicLong 漂移)。{@code recompute_status=0} 的总行数。
+     */
+    @Scheduled(fixedDelay = 5L * 60L * 1000L)
+    public void refreshDisabledUserGauge() {
+        try {
+            Long count = mapper.countDisabledUsers();
+            if (count != null) {
+                disabledUserCount.set(count);
+            }
+        } catch (Exception e) {
+            log.debug("[AI][MEMORY] refreshDisabledUserGauge skipped reason={}", e.getMessage());
+        }
     }
 
     // ============================ 内部类 ============================

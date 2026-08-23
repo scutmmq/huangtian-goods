@@ -66,6 +66,13 @@ public interface UserMemoryMapper extends BaseMapper<UserMemoryEntity> {
     Long getComputeSeq(@Param("userId") Long userId);
 
     /**
+     * B3 step10:统计 {@code recompute_status=0}(DISABLED)用户数,用于
+     * {@code ai_memory_fail_users} gauge 初值填充与定期刷新。
+     */
+    @Select("SELECT COUNT(*) FROM ai_user_memory WHERE recompute_status=0")
+    Long countDisabledUsers();
+
+    /**
      * B3 step7: cron 游标扫描 — 找"陈旧且需重算"的用户 ID(见 spec §3.5,NOT EXISTS 避免 N+1)。
      *
      * <p>过滤条件:

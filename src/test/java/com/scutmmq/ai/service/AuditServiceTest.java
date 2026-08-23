@@ -3,6 +3,7 @@ package com.scutmmq.ai.service;
 import com.scutmmq.ai.config.AiMemoryProperties;
 import com.scutmmq.ai.entity.UserMemoryAuditEntity;
 import com.scutmmq.ai.mapper.UserMemoryAuditMapper;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -55,7 +56,7 @@ class AuditServiceTest {
         props.setActiveSecretVersion("v1");
         // 默认 rate=100,具体用例按需 setUp override
         props.setAuditPurgeRateRowsPerSec(100);
-        service = new AuditService(jdbc, auditMapper, props);
+        service = new AuditService(jdbc, auditMapper, props, new SimpleMeterRegistry());
     }
 
     // ----- Step 9 核心 3 测试 -----
@@ -127,7 +128,7 @@ class AuditServiceTest {
      */
     @Test
     void rateGateFirstCallIsImmediate() {
-        AuditService fresh = new AuditService(jdbc, auditMapper, props);
+        AuditService fresh = new AuditService(jdbc, auditMapper, props, new SimpleMeterRegistry());
         // rate=1 row/s,1000 行目标等待 = 1000s,但首次必须立即返回
         props.setAuditPurgeRateRowsPerSec(1);
         when(jdbc.queryForObject(anyString(), eq(Integer.class), eq(7L))).thenReturn(1000);

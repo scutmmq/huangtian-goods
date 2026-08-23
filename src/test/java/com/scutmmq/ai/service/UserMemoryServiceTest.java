@@ -8,6 +8,8 @@ import com.scutmmq.ai.entity.UserMemoryEntity;
 import com.scutmmq.ai.mapper.UserMemoryMapper;
 import com.scutmmq.ai.security.PromptSanitizer;
 import com.scutmmq.utils.RedisConstants;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -69,6 +71,7 @@ class UserMemoryServiceTest {
     private PromptSanitizer sanitizer;
     private AuditService auditService;
     private AiMemoryProperties props;
+    private MeterRegistry meter;
 
     /** 由测试控制的 Executor,记录被提交的 Runnable。 */
     private CapturingExecutor asyncExec;
@@ -96,9 +99,10 @@ class UserMemoryServiceTest {
         props.setRecomputeMaxFailCount(3);
 
         asyncExec = new CapturingExecutor();
+        meter = new SimpleMeterRegistry();
 
         service = new UserMemoryService(redis, mapper, builder, cache, sanitizer, auditService,
-                props, asyncExec);
+                props, asyncExec, meter);
 
         // 默认 mapper.selectById 返回 null,后续按需覆盖
         when(mapper.selectById(any())).thenReturn(null);
@@ -107,6 +111,7 @@ class UserMemoryServiceTest {
         when(mapper.updatePreference(anyLong(), anyString(), anyInt())).thenReturn(1);
         when(mapper.bumpComputeSeq(anyLong(), anyInt())).thenReturn(1);
         when(mapper.resetMemory(anyLong())).thenReturn(1);
+        when(mapper.countDisabledUsers()).thenReturn(0L);
     }
 
     // ============================== 防抖 (3) ==============================
@@ -405,7 +410,7 @@ class UserMemoryServiceTest {
 
         // 用 mdcExec 重新构造 service,直接调 recomputeFor 验证子线程看到 traceId
         UserMemoryService mdcService = new UserMemoryService(
-                redis, mapper, builder, cache, sanitizer, auditService, props, mdcExec);
+                redis, mapper, builder, cache, sanitizer, auditService, props, mdcExec, meter);
 
         UserMemoryEntity existing = new UserMemoryEntity();
         existing.setUserId(7L);
