@@ -114,6 +114,16 @@
             <version>3.17.4</version>
         </dependency>
 
+        <!-- B3 step0:AI 长期记忆 Prometheus 指标 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.redisson</groupId>
             <artifactId>redisson</artifactId>
