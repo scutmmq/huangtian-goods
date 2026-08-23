@@ -46,7 +46,7 @@ CREATE TABLE ai_user_memory_audit (
   error_message TEXT NULL,
   expires_at    DATETIME NULL,
   created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (id),
+  PRIMARY KEY (id, created_at),
   KEY idx_action_time (action, created_at),
   KEY idx_user_time (user_id, created_at),
   CONSTRAINT chk_action CHECK (action IN (
