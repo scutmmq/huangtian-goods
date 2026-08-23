@@ -120,4 +120,25 @@ class AuditServiceTest {
         // queryForObject 只调用 1 次(外层 while 进入 1 次就成功,内层 for 跑 100 次)
         verify(jdbc, times(1)).queryForObject(anyString(), eq(Integer.class), eq(7L));
     }
+
+    /**
+     * 验证 rateGate 首次调用立即放行:即使 rate 很慢(1 row/s → 1000 行要等 1000s),
+     * 第一个 batch 也不能 sleep。用全新 AuditService 模拟 JVM 冷启动场景。
+     */
+    @Test
+    void rateGateFirstCallIsImmediate() {
+        AuditService fresh = new AuditService(jdbc, auditMapper, props);
+        // rate=1 row/s,1000 行目标等待 = 1000s,但首次必须立即返回
+        props.setAuditPurgeRateRowsPerSec(1);
+        when(jdbc.queryForObject(anyString(), eq(Integer.class), eq(7L))).thenReturn(1000);
+
+        long start = System.currentTimeMillis();
+        fresh.purgeAuditAsync(7L);
+        long elapsedMs = System.currentTimeMillis() - start;
+
+        // 首次立即放行,整次 purge 应远小于 1000s(放宽到 <100ms,因为只跑 1 批)
+        assertTrue(elapsedMs < 100L,
+                "first batch must not sleep even with slow rate, was " + elapsedMs + "ms");
+        verify(jdbc, times(1)).update(contains("UPDATE ai_user_memory_audit"), eq(7L));
+    }
 }

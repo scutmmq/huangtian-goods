@@ -39,7 +39,7 @@ public class AuditService {
     private final UserMemoryAuditMapper auditMapper;
     private final AiMemoryProperties props;
 
-    /** Rate gate 状态:上一次 batch 的 nanoTime,首调为 0 表示立刻放行。 */
+    /** Rate gate 状态:上一次 batch 的 nanoTime,0 表示尚未初始化(首次调用立即放行并设为 now)。 */
     private long lastBatchNanos = 0L;
     private final Object rateLock = new Object();
 
@@ -159,6 +159,10 @@ public class AuditService {
         long targetNanos = (long) ((double) permits * 1_000_000_000L
                 / props.getAuditPurgeRateRowsPerSec());
         synchronized (rateLock) {
+            if (lastBatchNanos == 0L) {
+                lastBatchNanos = System.nanoTime();
+                return;
+            }
             long now = System.nanoTime();
             long wait = lastBatchNanos + targetNanos - now;
             if (wait > 0) {
