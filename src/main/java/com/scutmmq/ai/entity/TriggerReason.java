@@ -11,6 +11,9 @@ public enum TriggerReason {
     /** 用户下单后,触发偏好重算。 */
     TRIGGER_ORDER,
 
+    /** 用户退款后触发偏好重算(returnRate 变化等)。 */
+    TRIGGER_REFUND,
+
     /** 用户加入/移除购物车后触发。 */
     TRIGGER_CART,
 

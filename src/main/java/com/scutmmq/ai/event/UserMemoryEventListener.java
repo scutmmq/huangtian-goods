@@ -15,7 +15,7 @@ import org.springframework.transaction.event.TransactionalEventListener;
  * <p>作为 4 类 UserMemory 相关领域事件的统一入口:
  * <ul>
  *   <li>{@link OrderPlacedEvent}      → 调度重算 (TRIGGER_ORDER)</li>
- *   <li>{@link OrderRefundedEvent}    → 调度重算 (TRIGGER_OTHER,现有枚举无 ORDER_REFUNDED,详见 task-6-report.md)</li>
+ *   <li>{@link OrderRefundedEvent}    → 调度重算 (TRIGGER_REFUND)</li>
  *   <li>{@link ProfileUpdatedEvent}   → 调度重算 (TRIGGER_PROFILE_UPDATE)</li>
  *   <li>{@link MerchantRegisteredEvent} → 调度重算 (TRIGGER_ONBOARD,首次注册语义)</li>
  * </ul>
@@ -45,8 +45,7 @@ public class UserMemoryEventListener {
         if (event instanceof OrderPlacedEvent e) {
             service.scheduleRecompute(e.userId(), TriggerReason.TRIGGER_ORDER);
         } else if (event instanceof OrderRefundedEvent e) {
-            // 注:现有 TriggerReason 枚举无 ORDER_REFUNDED,沿用 TRIGGER_OTHER 占位
-            service.scheduleRecompute(e.userId(), TriggerReason.TRIGGER_OTHER);
+            service.scheduleRecompute(e.userId(), TriggerReason.TRIGGER_REFUND);
         } else if (event instanceof ProfileUpdatedEvent e) {
             service.scheduleRecompute(e.userId(), TriggerReason.TRIGGER_PROFILE_UPDATE);
         } else if (event instanceof MerchantRegisteredEvent e) {

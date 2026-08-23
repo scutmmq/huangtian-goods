@@ -19,7 +19,7 @@ import static org.mockito.Mockito.verify;
  * <p>覆盖 4 个核心场景:
  * <ul>
  *   <li>OrderPlacedEvent → {@link TriggerReason#TRIGGER_ORDER}</li>
- *   <li>OrderRefundedEvent → {@link TriggerReason#TRIGGER_OTHER}(注:现有枚举无 ORDER_REFUNDED,见 task-6-report.md)</li>
+ *   <li>OrderRefundedEvent → {@link TriggerReason#TRIGGER_REFUND}</li>
  *   <li>ProfileUpdatedEvent → {@link TriggerReason#TRIGGER_PROFILE_UPDATE}</li>
  *   <li>MerchantRegisteredEvent → {@link TriggerReason#TRIGGER_ONBOARD}(注:现有枚举无 MERCHANT_REGISTERED)</li>
  *   <li>陌生事件类型不被处理</li>
@@ -49,8 +49,7 @@ class UserMemoryEventListenerTest {
     void orderRefundedTriggersRecompute() {
         OrderRefundedEvent event = new OrderRefundedEvent("test", 7L, 100L, Instant.now());
         listener.onEvent(event);
-        // 现有 TriggerReason 枚举无 ORDER_REFUNDED,沿用 TRIGGER_OTHER 占位(详见 task-6-report.md)
-        verify(service).scheduleRecompute(7L, TriggerReason.TRIGGER_OTHER);
+        verify(service).scheduleRecompute(7L, TriggerReason.TRIGGER_REFUND);
     }
 
     @Test
