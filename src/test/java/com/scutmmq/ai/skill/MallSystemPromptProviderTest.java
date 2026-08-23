@@ -1,10 +1,14 @@
 package com.scutmmq.ai.skill;
 
+import com.scutmmq.ai.service.UserMemoryService;
 import com.scutmmq.dto.UserDTO;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * C7 DSML 纪律 V2 prompt 防回滚测试。
@@ -12,10 +16,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 关键约束词必须持续存在,否则视为 prompt 改版事故。
  * 这些短语是模型防止"自行车事故"(用户看到裸露 DSML)的最后防线,
  * 不能在 prompt 调优过程中被无意删除。
+ *
+ * <p>B3 step8: 注入 mocked {@link UserMemoryService} — 测试只关注 prompt 内容,不关注画像渲染。
  */
 class MallSystemPromptProviderTest {
 
-    private final MallSystemPromptProvider provider = new MallSystemPromptProvider();
+    private final UserMemoryService memoryService = mock(UserMemoryService.class);
+    private final MallSystemPromptProvider provider = new MallSystemPromptProvider(memoryService);
+
+    {
+        // 默认 renderMemorySection 返空(模拟新用户),避免污染既有断言
+        when(memoryService.renderMemorySection(anyLong())).thenReturn("");
+    }
 
     @Test
     void promptContainsDsmlInvisibleFact() {

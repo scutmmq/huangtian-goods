@@ -1,6 +1,8 @@
 package com.scutmmq.ai.skill;
 
+import com.scutmmq.ai.service.UserMemoryService;
 import com.scutmmq.dto.UserDTO;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.time.ZoneId;
@@ -10,9 +12,16 @@ import java.time.format.DateTimeFormatter;
 /**
  * 商城 AI 助手系统提示词。把商城“能做什么、不能做什么、必须如何使用工具”写死在这里，
  * 而不是依赖模型自己理解接口文档。
+ *
+ * <p>B3 step8: 在 BASE_PROMPT 之前插入用户画像(memory section),
+ * 让模型看到用户当前的偏好/身份后再开始回答;空画像(render 返回 "")
+ * 时跳过,不污染 prompt。
  */
 @Component
+@RequiredArgsConstructor
 public class MallSystemPromptProvider {
+
+    private final UserMemoryService memoryService;
 
     private static final String BASE_PROMPT = """
             你是“荒天享物”商城的官方 AI 购物助手。
@@ -113,9 +122,19 @@ public class MallSystemPromptProvider {
      * 模型被问"今天/现在/几点"时直接读这一行，不要凭训练数据推测。
      */
     public String buildSystemPrompt(UserDTO currentUser) {
+        StringBuilder sb = new StringBuilder();
+        // 1. 用户画像(B3 step8 新增):render 返回 "" 时跳过,避免空段污染 prompt
+        if (currentUser != null && currentUser.getId() != null) {
+            String memorySection = memoryService.renderMemorySection(currentUser.getId());
+            if (memorySection != null && !memorySection.isEmpty()) {
+                sb.append(memorySection).append("\n");
+            }
+        }
+        // 2. BASE_PROMPT
+        sb.append(BASE_PROMPT);
+        // 3. 日期 + 当前用户(原顺序)
         ZonedDateTime now = ZonedDateTime.now(ZoneId.of("Asia/Shanghai"));
         String nowText = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").format(now);
-        StringBuilder sb = new StringBuilder(BASE_PROMPT);
         sb.append("\n当前日期时间: ").append(nowText).append(" (Asia/Shanghai)\n");
         if (currentUser != null) {
             sb.append("当前用户: ")

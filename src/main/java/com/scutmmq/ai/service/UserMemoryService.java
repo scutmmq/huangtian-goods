@@ -3,6 +3,7 @@ package com.scutmmq.ai.service;
 import com.scutmmq.ai.cache.UserMemoryCache;
 import com.scutmmq.ai.cache.UserMemoryCache.CacheSnapshot;
 import com.scutmmq.ai.config.AiMemoryProperties;
+import com.scutmmq.ai.dto.UserMemoryOverviewVO;
 import com.scutmmq.ai.entity.TriggerReason;
 import com.scutmmq.ai.entity.UserMemoryEntity;
 import com.scutmmq.ai.mapper.UserMemoryMapper;
@@ -16,7 +17,6 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -374,9 +374,12 @@ public class UserMemoryService {
         }
         boolean hasIdentity = !"{}".equals(e.getIdentityJson());
         boolean hasPreference = !"{}".equals(e.getPreferenceJson());
+        Instant computedAt = e.getComputedAt() == null
+                ? Instant.now()
+                : e.getComputedAt().atZone(java.time.ZoneId.systemDefault()).toInstant();
         return new UserMemoryOverviewVO(
                 hasIdentity, hasPreference,
-                e.getComputedAt() == null ? LocalDateTime.now() : e.getComputedAt(),
+                computedAt,
                 e.getVersion() == null ? 0 : e.getVersion(),
                 "我们记住了你的基础资料和最近 90 天的购买偏好,用于个性化推荐。",
                 List.of("身份档案", "偏好画像"),
