@@ -10,6 +10,7 @@ import com.scutmmq.service.NotificationService;
 import com.scutmmq.service.OrderService;
 import com.scutmmq.vo.OrderItemsVO;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.io.ClassPathResource;
@@ -23,10 +24,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.*;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Component
 @RequiredArgsConstructor
@@ -36,9 +35,29 @@ public class OrderTimeOutTask {
 
     private final StringRedisTemplate redisTemplate;
 
-    private final ScheduledExecutorService GET_TIME_OUT_ORDER_EXECUTORS = Executors.newSingleThreadScheduledExecutor(r->new Thread(r,"order-timeout-scan-thread"));
+    /**
+     * 超时订单扫描定时线程池。
+     * 遵循阿里规范：使用 ScheduledThreadPoolExecutor 明确核心线程数、线程命名与拒绝策略。
+     */
+    private final ScheduledExecutorService getTimeOutOrderExecutor = new ScheduledThreadPoolExecutor(
+            1,
+            new NamedThreadFactory("order-timeout-scan"),
+            new ThreadPoolExecutor.DiscardPolicy()
+    );
 
-    private final ExecutorService HANDLE_TIMEOUT_ORDER_EXECUTORS = Executors.newSingleThreadExecutor(r->new Thread(r,"order-timeout-handle-thread"));
+    /**
+     * 超时订单消息队列消费线程池。
+     * 遵循阿里规范：使用 ThreadPoolExecutor 显式配置有界队列与 CallerRunsPolicy 拒绝策略。
+     */
+    private final ExecutorService handleTimeoutOrderExecutor = new ThreadPoolExecutor(
+            1,
+            1,
+            0L,
+            TimeUnit.MILLISECONDS,
+            new LinkedBlockingQueue<>(1024),
+            new NamedThreadFactory("order-timeout-handle"),
+            new ThreadPoolExecutor.CallerRunsPolicy()
+    );
 
     private static final DefaultRedisScript<Long> REMOVE_ZSET_MEMBERS;
 
@@ -49,6 +68,7 @@ public class OrderTimeOutTask {
     private final RedisUtils redisUtils;
 
     private final NotificationService notificationService;
+
     static {
         REMOVE_ZSET_MEMBERS = new DefaultRedisScript<>();
         REMOVE_ZSET_MEMBERS.setResultType(Long.class);
@@ -57,13 +77,50 @@ public class OrderTimeOutTask {
 
     @PostConstruct
     void init(){
-        GET_TIME_OUT_ORDER_EXECUTORS.scheduleAtFixedRate(
+        getTimeOutOrderExecutor.scheduleAtFixedRate(
                 new GetTimeOutOrderHandler(),
                 0,
                 10,
                 TimeUnit.SECONDS
         );
-        HANDLE_TIMEOUT_ORDER_EXECUTORS.submit(new HandlerTimeoutOrderMQ());
+        handleTimeoutOrderExecutor.submit(new HandlerTimeoutOrderMQ());
+    }
+
+    @PreDestroy
+    public void destroy() {
+        log.info("开始关闭超时订单扫描与消费线程池...");
+        shutdownExecutor(getTimeOutOrderExecutor, "getTimeOutOrderExecutor");
+        shutdownExecutor(handleTimeoutOrderExecutor, "handleTimeoutOrderExecutor");
+    }
+
+    private void shutdownExecutor(ExecutorService executor, String name) {
+        if (executor != null && !executor.isShutdown()) {
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                executor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private static class NamedThreadFactory implements ThreadFactory {
+        private final String prefix;
+        private final AtomicInteger threadNumber = new AtomicInteger(1);
+
+        public NamedThreadFactory(String prefix) {
+            this.prefix = prefix;
+        }
+
+        @Override
+        public Thread newThread(Runnable r) {
+            Thread t = new Thread(r, prefix + "-" + threadNumber.getAndIncrement());
+            t.setDaemon(false);
+            return t;
+        }
     }
 
     private  final class GetTimeOutOrderHandler implements Runnable{
@@ -96,7 +153,7 @@ public class OrderTimeOutTask {
             Long flag = redisTemplate.execute(
                     REMOVE_ZSET_MEMBERS,
                     Collections.emptyList(),
-                    timeoutOrderIds.toArray(new String[0])
+                    (Object[]) timeoutOrderIds.toArray(new String[0])
             );
             if (flag != 1) {
                 log.error("zset订单成员删除失败!");
@@ -121,7 +178,7 @@ public class OrderTimeOutTask {
         @Override
         public void run() {
             log.info("消息队列开始获取消息");
-            while (true){
+            while (!Thread.currentThread().isInterrupted()){
                 try {
                     // 不断从消息队列读取信息 阻塞5秒读一次
                     final List<MapRecord<String, Object, Object>> mapRecordList = redisTemplate.opsForStream().read(
@@ -141,6 +198,11 @@ public class OrderTimeOutTask {
                     }
 
                 }catch (Exception e){
+                    if (Thread.currentThread().isInterrupted()) {
+                        log.info("超时订单消费线程被中断，正在退出...");
+                        break;
+                    }
+                    log.error("消费超时订单Stream时发生异常，尝试处理Pending列表: {}", e.getMessage());
                     handlePendingList();
                 }
             }
