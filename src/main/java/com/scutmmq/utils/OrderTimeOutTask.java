@@ -36,8 +36,7 @@ public class OrderTimeOutTask {
     private final StringRedisTemplate redisTemplate;
 
     /**
-     * 超时订单扫描定时线程池。
-     * 遵循阿里规范：使用 ScheduledThreadPoolExecutor 明确核心线程数、线程命名与拒绝策略。
+     * 超时订单扫描定时线程池，周期性触发延迟队列扫描。
      */
     private final ScheduledExecutorService getTimeOutOrderExecutor = new ScheduledThreadPoolExecutor(
             1,
@@ -46,8 +45,7 @@ public class OrderTimeOutTask {
     );
 
     /**
-     * 超时订单消息队列消费线程池。
-     * 遵循阿里规范：使用 ThreadPoolExecutor 显式配置有界队列与 CallerRunsPolicy 拒绝策略。
+     * 超时订单消息队列消费线程池，常驻监听并处理超时订单取消事件。
      */
     private final ExecutorService handleTimeoutOrderExecutor = new ThreadPoolExecutor(
             1,
