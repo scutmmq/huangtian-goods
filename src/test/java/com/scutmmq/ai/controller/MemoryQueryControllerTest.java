@@ -39,7 +39,7 @@ class MemoryQueryControllerTest {
     @BeforeEach
     void setUp() {
         service = mock(UserMemoryService.class);
-        controller = new MemoryQueryController(service, new UserHolder());
+        controller = new MemoryQueryController(service);
 
         UserDTO user = new UserDTO();
         user.setId(42L);

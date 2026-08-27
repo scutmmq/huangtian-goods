@@ -27,13 +27,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class MemoryResetController {
 
     private final UserMemoryService service;
-    private final UserHolder userHolder;
     /** B3 step10: 每次 reset 调用计数 — {@code ai_memory_reset_total} */
     private final Counter resetCounter;
 
-    public MemoryResetController(UserMemoryService service, UserHolder userHolder, MeterRegistry meter) {
+    public MemoryResetController(UserMemoryService service, MeterRegistry meter) {
         this.service = service;
-        this.userHolder = userHolder;
         this.resetCounter = Counter.builder("ai_memory_reset_total")
                 .description("POST /ai/memory/reset 调用次数")
                 .register(meter);
@@ -41,7 +39,7 @@ public class MemoryResetController {
 
     @PostMapping("/reset")
     public Result reset() {
-        Long userId = userHolder.getUser().getId();
+        Long userId = UserHolder.getUser().getId();
         Assert.isTrue(userId != null, "userId must not be null");
         log.info("[AI][CTRL] POST /ai/memory/reset userId={}", userId);
         service.reset(userId);

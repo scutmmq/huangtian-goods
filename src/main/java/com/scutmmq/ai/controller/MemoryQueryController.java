@@ -25,11 +25,10 @@ import org.springframework.web.bind.annotation.RestController;
 public class MemoryQueryController {
 
     private final UserMemoryService service;
-    private final UserHolder userHolder;
 
     @GetMapping("")
     public Result get() {
-        Long userId = userHolder.getUser().getId();
+        Long userId = UserHolder.getUser().getId();
         log.debug("[AI][CTRL] GET /ai/memory userId={}", userId);
         UserMemoryOverviewVO overview = service.buildOverview(userId);
         return Result.success(overview);

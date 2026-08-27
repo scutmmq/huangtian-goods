@@ -35,8 +35,8 @@ class MemoryResetControllerTest {
     @BeforeEach
     void setUp() {
         service = mock(UserMemoryService.class);
-        // UserHolder 是 static 工具类,这里 new 一个实例只是为了满足构造签名
-        controller = new MemoryResetController(service, new UserHolder(), new SimpleMeterRegistry());
+        // UserHolder 是 static 工具类,不再注入
+        controller = new MemoryResetController(service, new SimpleMeterRegistry());
         // ThreadLocal 准备:把当前线程的 user 设为 42L
         UserDTO user = new UserDTO();
         user.setId(42L);
