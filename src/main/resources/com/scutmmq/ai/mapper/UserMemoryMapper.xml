@@ -4,7 +4,7 @@
 
     <!--
         B3 step4: 用户长期记忆聚合 SQL(7 条),与 UserMemoryBuilder 内部常量保持同步。
-        所有查询都过滤 user_id=? AND ordered_at >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+        所有查询都过滤 user_id=? AND ordered_time >= DATE_SUB(NOW(), INTERVAL 90 DAY)
                                     AND status IN ('paid','shipped','delivered'),
         防止陈旧订单污染近 90 天偏好画像。
     -->
@@ -19,7 +19,7 @@
           MAX(o.total_amount)               AS max
         FROM orders o
         WHERE o.user_id = #{userId}
-          AND o.ordered_at &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND o.ordered_time &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
           AND o.status IN ('paid','shipped','delivered')
           AND o.total_amount &gt; 0
     </select>
@@ -35,7 +35,7 @@
         JOIN product p      ON p.id        = oi.product_id
         JOIN product_category pc ON pc.id   = p.category_id
         WHERE o.user_id = #{userId}
-          AND o.ordered_at &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND o.ordered_time &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
           AND o.status IN ('paid','shipped','delivered')
         GROUP BY pc.id, pc.name
         ORDER BY spend DESC
@@ -51,7 +51,7 @@
         FROM orders o
         JOIN merchant m ON m.id = o.merchant_id
         WHERE o.user_id = #{userId}
-          AND o.ordered_at &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND o.ordered_time &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
           AND o.status IN ('paid','shipped','delivered')
         GROUP BY m.id, m.name
         ORDER BY spend DESC
@@ -67,7 +67,7 @@
                 / NULLIF(COUNT(*), 0), 4) AS rate
         FROM orders o
         WHERE o.user_id = #{userId}
-          AND o.ordered_at &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND o.ordered_time &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
           AND o.status IN ('paid','shipped','delivered')
     </select>
 
@@ -77,7 +77,7 @@
                COUNT(*)         AS count
         FROM orders o
         WHERE o.user_id = #{userId}
-          AND o.ordered_at &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND o.ordered_time &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
           AND o.status IN ('paid','shipped','delivered')
         GROUP BY o.payment_method
         ORDER BY count DESC
@@ -89,22 +89,22 @@
                COUNT(*)          AS count
         FROM orders o
         WHERE o.user_id = #{userId}
-          AND o.ordered_at &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND o.ordered_time &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
           AND o.status IN ('paid','shipped','delivered')
           AND o.shipping_method IS NOT NULL
         GROUP BY o.shipping_method
         ORDER BY count DESC
     </select>
 
-    <!-- 7. 活跃时段:按 HOUR(ordered_at) 分组 TOP 5 -->
+    <!-- 7. 活跃时段:按 HOUR(ordered_time) 分组 TOP 5 -->
     <select id="activeHours" resultType="com.scutmmq.ai.builder.UserMemoryBuilder$ActiveHoursRow">
-        SELECT HOUR(o.ordered_at) AS hour,
+        SELECT HOUR(o.ordered_time) AS hour,
                COUNT(*)           AS count
         FROM orders o
         WHERE o.user_id = #{userId}
-          AND o.ordered_at &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND o.ordered_time &gt;= DATE_SUB(NOW(), INTERVAL 90 DAY)
           AND o.status IN ('paid','shipped','delivered')
-        GROUP BY HOUR(o.ordered_at)
+        GROUP BY HOUR(o.ordered_time)
         ORDER BY count DESC
         LIMIT 5
     </select>

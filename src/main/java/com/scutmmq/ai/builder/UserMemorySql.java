@@ -10,7 +10,7 @@ package com.scutmmq.ai.builder;
  * <p>所有聚合 SQL 都过滤:
  * <pre>
  *   user_id = ?
- *   AND ordered_at >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+ *   AND ordered_time >= DATE_SUB(NOW(), INTERVAL 90 DAY)
  *   AND status IN ('paid','shipped','delivered')
  * </pre>
  */
@@ -29,7 +29,7 @@ public final class UserMemorySql {
             + "MAX(o.total_amount) AS max "
             + "FROM orders o "
             + "WHERE o.user_id = ? "
-            + "AND o.ordered_at >= DATE_SUB(NOW(), INTERVAL 90 DAY) "
+            + "AND o.ordered_time >= DATE_SUB(NOW(), INTERVAL 90 DAY) "
             + "AND o.status IN ('paid','shipped','delivered') "
             + "AND o.total_amount > 0";
 
@@ -41,7 +41,7 @@ public final class UserMemorySql {
             + "JOIN product p ON p.id = oi.product_id "
             + "JOIN product_category pc ON pc.id = p.category_id "
             + "WHERE o.user_id = ? "
-            + "AND o.ordered_at >= DATE_SUB(NOW(), INTERVAL 90 DAY) "
+            + "AND o.ordered_time >= DATE_SUB(NOW(), INTERVAL 90 DAY) "
             + "AND o.status IN ('paid','shipped','delivered') "
             + "GROUP BY pc.id, pc.name "
             + "ORDER BY spend DESC LIMIT 3";
@@ -52,7 +52,7 @@ public final class UserMemorySql {
             + "FROM orders o "
             + "JOIN merchant m ON m.id = o.merchant_id "
             + "WHERE o.user_id = ? "
-            + "AND o.ordered_at >= DATE_SUB(NOW(), INTERVAL 90 DAY) "
+            + "AND o.ordered_time >= DATE_SUB(NOW(), INTERVAL 90 DAY) "
             + "AND o.status IN ('paid','shipped','delivered') "
             + "GROUP BY m.id, m.name "
             + "ORDER BY spend DESC LIMIT 3";
@@ -64,14 +64,14 @@ public final class UserMemorySql {
             + "ROUND(SUM(CASE WHEN o.payment_status = 'refunded' THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0), 4) AS rate "
             + "FROM orders o "
             + "WHERE o.user_id = ? "
-            + "AND o.ordered_at >= DATE_SUB(NOW(), INTERVAL 90 DAY) "
+            + "AND o.ordered_time >= DATE_SUB(NOW(), INTERVAL 90 DAY) "
             + "AND o.status IN ('paid','shipped','delivered')";
 
     /** 5. 偏好支付方式:GROUP BY payment_method */
     public static final String PAYMENT_METHOD = "SELECT o.payment_method AS method, COUNT(*) AS count "
             + "FROM orders o "
             + "WHERE o.user_id = ? "
-            + "AND o.ordered_at >= DATE_SUB(NOW(), INTERVAL 90 DAY) "
+            + "AND o.ordered_time >= DATE_SUB(NOW(), INTERVAL 90 DAY) "
             + "AND o.status IN ('paid','shipped','delivered') "
             + "GROUP BY o.payment_method ORDER BY count DESC";
 
@@ -79,18 +79,18 @@ public final class UserMemorySql {
     public static final String SHIPPING_METHOD = "SELECT o.shipping_method AS method, COUNT(*) AS count "
             + "FROM orders o "
             + "WHERE o.user_id = ? "
-            + "AND o.ordered_at >= DATE_SUB(NOW(), INTERVAL 90 DAY) "
+            + "AND o.ordered_time >= DATE_SUB(NOW(), INTERVAL 90 DAY) "
             + "AND o.status IN ('paid','shipped','delivered') "
             + "AND o.shipping_method IS NOT NULL "
             + "GROUP BY o.shipping_method ORDER BY count DESC";
 
-    /** 7. 活跃时段:按 HOUR(ordered_at) 分组 TOP 5 */
-    public static final String ACTIVE_HOURS = "SELECT HOUR(o.ordered_at) AS hour, COUNT(*) AS count "
+    /** 7. 活跃时段:按 HOUR(ordered_time) 分组 TOP 5 */
+    public static final String ACTIVE_HOURS = "SELECT HOUR(o.ordered_time) AS hour, COUNT(*) AS count "
             + "FROM orders o "
             + "WHERE o.user_id = ? "
-            + "AND o.ordered_at >= DATE_SUB(NOW(), INTERVAL 90 DAY) "
+            + "AND o.ordered_time >= DATE_SUB(NOW(), INTERVAL 90 DAY) "
             + "AND o.status IN ('paid','shipped','delivered') "
-            + "GROUP BY HOUR(o.ordered_at) ORDER BY count DESC LIMIT 5";
+            + "GROUP BY HOUR(o.ordered_time) ORDER BY count DESC LIMIT 5";
 
     // ============================ identity SQL ============================
 

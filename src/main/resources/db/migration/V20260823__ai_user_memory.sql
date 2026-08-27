@@ -9,8 +9,8 @@
 -- 0. orders 表新增复合索引(gh-ost 跑,不阻塞写入)
 -- 见 §2.5 spec
 ALTER TABLE orders
-  ADD KEY idx_user_status_time (user_id, status, ordered_at),
-  ADD KEY idx_user_payment_time (user_id, payment_status, ordered_at);
+  ADD KEY idx_user_status_time (user_id, status, ordered_time),
+  ADD KEY idx_user_payment_time (user_id, payment_status, ordered_time);
 
 -- 1. ai_user_memory 主表
 CREATE TABLE ai_user_memory (
