@@ -357,6 +357,14 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
         Long orderId = dto.getOrderId();
 
         final Orders orders = getById(orderId);
+        if (orders == null) {
+            return Result.error("订单不存在");
+        }
+
+        Long currentUserId = UserHolder.getUser().getId();
+        if (!Objects.equals(orders.getUserId(), currentUserId)) {
+            throw new BusinessException("无权操作该订单");
+        }
 
         if(orders.getStatus()==OrderStatus.CANCELLED){
             return Result.error("此订单已经取消过了");
@@ -389,11 +397,6 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
             return Result.success(true);
         }
 
-        if(!Objects.equals(orders.getMerchantId(), dto.getMerchantId()) ||
-                !Objects.equals(orders.getUserId(), dto.getUserId())){
-            throw new BusinessException("订单状态出现异常");
-        }
-
         if(!Arrays.asList(OrderStatus.PAID,OrderStatus.SHIPPED,OrderStatus.DELIVERED).contains(orders.getStatus())){
             return Result.error("该订单状态不允许退货！");
         }
@@ -407,8 +410,8 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
         try {
             ReturnAudit audit = new ReturnAudit();
             audit.setOrderId(orderId);
-            audit.setUserId(dto.getUserId());
-            audit.setMerchantId(dto.getMerchantId());
+            audit.setUserId(currentUserId);
+            audit.setMerchantId(orders.getMerchantId());
             audit.setReturnReason(dto.getReturnReason());
             audit.setReturnImages(dto.getReturnImages());
             audit.setAuditStatus(AuditStatus.PENDING); // 待审核
@@ -427,41 +430,58 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
             // 保存记录成功
 
             // 通知商家处理退货（系统消息）
-            String nick = userService.getById(dto.getUserId()).getNickName();
+            String nick = userService.getById(currentUserId).getNickName();
             String now = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
             String content = "系统消息：顾客" + nick + "在" + now + "申请了订单#" + orderId + "的退货，请尽快审核处理";
-            notificationService.sendToMerchant(dto.getMerchantId(), content);
+            notificationService.sendToMerchant(orders.getMerchantId(), content);
 
             return  Result.success();
         }catch (Exception e){
-            throw new BusinessException("订单异常");
+            throw new BusinessException(e.getMessage() != null ? e.getMessage() : "订单异常");
         }
     }
 
     @Override
     @LogAnnotation(type = OperationType.UPDATE,description = "处理退货")
     public Result approveReturn(ApproveReturnDTO dto) {
+        Long currentUserId = UserHolder.getUser().getId();
+        Long myMerchantId = merchantUserMapper.getMerchantIdByUserId(currentUserId);
+        if (myMerchantId == null) {
+            throw new BusinessException("您未注册商户，无权处理退货");
+        }
+
         // 1.校验审核记录
         final ReturnAudit audit = auditService.getById(dto.getAuditId());
         if(audit==null||audit.getAuditStatus()!=AuditStatus.PENDING){
             throw  new BusinessException("审核记录不存在或已经处理");
         }
-        // 2.订单商家是否正确
-        final Orders orders = orderMapper.selectById(dto.getOrderId());
-        if(!Objects.equals(orders.getMerchantId(), dto.getMerchantId())){
-            log.info("无权处理:{}",dto);
+        if(!Objects.equals(audit.getMerchantId(), myMerchantId)){
+            log.info("无权处理非本店退货申请: userId={}, myMerchantId={}, audit={}", currentUserId, myMerchantId, audit);
+            throw new BusinessException("无权审批非本店退货申请");
+        }
+
+        // 2.以审核单中的 orderId 为准，校验订单归属与状态
+        final Orders orders = orderMapper.selectById(audit.getOrderId());
+        if(orders == null || !Objects.equals(orders.getMerchantId(), myMerchantId)){
+            log.info("无权处理非本店订单: userId={}, myMerchantId={}, auditOrderId={}", currentUserId, myMerchantId, audit.getOrderId());
             throw  new BusinessException("无权处理该订单");
+        }
+        if(orders.getStatus() != OrderStatus.RETURN_APPLIED){
+            throw new BusinessException("当前订单未处于退货申请状态");
         }
 
         // 3.更新审核记录（以批准） 更新订单状态（退货已批准）
         try {
-            // 3.1 更新审核记录
-            audit.setAuditStatus(AuditStatus.APPROVE);
-            audit.setAuditTime(LocalDateTime.now());
-            audit.setAuditReason(dto.getAuditReason());//可选
-            final boolean updated = auditService.updateById(audit);
+            // 3.1 乐观条件更新审核记录，防并发重入
+            final boolean updated = auditService.lambdaUpdate()
+                    .set(ReturnAudit::getAuditStatus, AuditStatus.APPROVE)
+                    .set(ReturnAudit::getAuditTime, LocalDateTime.now())
+                    .set(ReturnAudit::getAuditReason, dto.getAuditReason())
+                    .eq(ReturnAudit::getId, audit.getId())
+                    .eq(ReturnAudit::getAuditStatus, AuditStatus.PENDING)
+                    .update();
             if(!updated){
-                throw new BusinessException("审核记录更新异常");
+                throw new BusinessException("审核记录更新异常或已被处理");
             }
             // 3.2 更新订单状态
             orders.setStatus(OrderStatus.CANCELLED);
@@ -506,28 +526,44 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
     @Override
     @LogAnnotation(type = OperationType.UPDATE,description = "拒绝退货")
     public Result rejectReturn(RejectReturnDTO dto) {
+        Long currentUserId = UserHolder.getUser().getId();
+        Long myMerchantId = merchantUserMapper.getMerchantIdByUserId(currentUserId);
+        if (myMerchantId == null) {
+            throw new BusinessException("您未注册商户，无权处理退货");
+        }
 
         // 1.校验审核记录
         final ReturnAudit audit = auditService.getById(dto.getAuditId());
         if(audit==null||audit.getAuditStatus()!=AuditStatus.PENDING){
             throw  new BusinessException("审核记录不存在或已经处理");
         }
-        // 2.订单商家是否正确
-        final Orders orders = orderMapper.selectById(dto.getOrderId());
-        if(!Objects.equals(orders.getMerchantId(), dto.getMerchantId())){
-            log.info("无权处理:{}",dto);
+        if(!Objects.equals(audit.getMerchantId(), myMerchantId)){
+            log.info("无权处理非本店退货申请: userId={}, myMerchantId={}, audit={}", currentUserId, myMerchantId, audit);
+            throw new BusinessException("无权审批非本店退货申请");
+        }
+
+        // 2.以审核单关联的 orderId 为准
+        final Orders orders = orderMapper.selectById(audit.getOrderId());
+        if(orders == null || !Objects.equals(orders.getMerchantId(), myMerchantId)){
+            log.info("无权处理非本店订单: userId={}, myMerchantId={}, auditOrderId={}", currentUserId, myMerchantId, audit.getOrderId());
             throw  new BusinessException("无权处理该订单");
+        }
+        if(orders.getStatus() != OrderStatus.RETURN_APPLIED){
+            throw new BusinessException("当前订单未处于退货申请状态");
         }
 
         // 3.更新审核记录 更新订单状态
         try {
-
-            audit.setAuditStatus(AuditStatus.REJECT);
-            audit.setAuditReason(dto.getAuditReason());
-            audit.setAuditTime(LocalDateTime.now());
-            final boolean updated = auditService.updateById(audit);
+            // 3.1 乐观更新审核记录，防并发
+            final boolean updated = auditService.lambdaUpdate()
+                    .set(ReturnAudit::getAuditStatus, AuditStatus.REJECT)
+                    .set(ReturnAudit::getAuditReason, dto.getAuditReason())
+                    .set(ReturnAudit::getAuditTime, LocalDateTime.now())
+                    .eq(ReturnAudit::getId, audit.getId())
+                    .eq(ReturnAudit::getAuditStatus, AuditStatus.PENDING)
+                    .update();
             if(!updated){
-                throw new BusinessException("审核记录更新异常");
+                throw new BusinessException("审核记录更新异常或已被处理");
             }
             // 3.2 更新订单状态
             orders.setStatus(this.getOriginalStatus(orders));

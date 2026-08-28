@@ -68,37 +68,37 @@ public class RefreshInterceptor implements HandlerInterceptor {
                 return  true;
             }
             // 计算令牌过期时间
-            long tokenExpire = claims.getExpiration().getTime()-System.currentTimeMillis() ;
+            long remainMillis = claims.getExpiration().getTime() - System.currentTimeMillis();
             Long redisExpire = stringRedisTemplate.getExpire(TOKEN_KEY + token, TimeUnit.MILLISECONDS);
 
-            if(claims.getExpiration().getTime()<1000*60*20||redisExpire<1000*60*20){
+            // 剩余有效时间小于 20 分钟时触发滑动续期
+            if (remainMillis > 0 && remainMillis < 20 * 60 * 1000L && redisExpire != null && redisExpire > 0) {
                 // 刷新令牌
                 final String newToken = JwtUtils.generateJwtToken(claims);
                 userDTO.setToken(newToken);
                 // 存用户进入threadLocal
                 UserHolder.saveUser(userDTO);
                 // 返回新token给用户
-                response.setHeader("Authorization",newToken);
+                response.setHeader("Authorization", newToken);
 
-                //在redis中删除原token，添加新token，保持有状态的jwt令牌
+                // 在redis中添加新token，保持有状态的jwt令牌
                 stringRedisTemplate
                         .opsForValue()
-                        .set(TOKEN_KEY + newToken,USER_PERMISSION,TOKEN_EXPIRATION,TOKEN_TIME_UNIT);
-                // 不立即删除旧token ，设置10秒后过期
-                stringRedisTemplate.expire(TOKEN_KEY+token,10, TimeUnit.SECONDS);
+                        .set(TOKEN_KEY + newToken, USER_PERMISSION, TOKEN_EXPIRATION, TOKEN_TIME_UNIT);
+                // 不立即删除旧token，设置15秒平滑过渡
+                stringRedisTemplate.expire(TOKEN_KEY + token, 15, TimeUnit.SECONDS);
                 return true;
             }
             userDTO.setToken(token);
             UserHolder.saveUser(userDTO);
+            return true;
 
-        }catch (ExpiredJwtException e) {
+        } catch (ExpiredJwtException e) {
             log.warn("令牌已过期:{}", e.getMessage());
-            throw new AuthorizeException("未登录");
-        } catch (UnsupportedJwtException | MalformedJwtException | IllegalArgumentException e) {
+            throw new AuthorizeException("登录已过期，请重新登录");
+        } catch (Exception e) {
             log.error("令牌无效:{}", e.getMessage());
-            throw new AuthorizeException("登录超时");
-        }finally {
-            return  true;
+            throw new AuthorizeException("登录凭据无效");
         }
     }
 

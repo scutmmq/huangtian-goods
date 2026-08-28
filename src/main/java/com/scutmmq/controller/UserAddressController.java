@@ -56,7 +56,7 @@ public class UserAddressController {
      */
     @DeleteMapping("/address/{id:\\d+}")
     public Result deleteAddress(@PathVariable Long id){
-        return Result.success(userAddressService.removeById(id));
+        return userAddressService.deleteAddress(id);
     }
 
     /**
@@ -68,7 +68,7 @@ public class UserAddressController {
     public Result deleteAddresses(@RequestParam String ids){
         log.info("收到批量删除地址:{}",ids);
         List<Long> listId = Arrays.stream(ids.split(",")).map(Long::valueOf).toList();
-        return Result.success(userAddressService.removeBatchByIds(listId));
+        return userAddressService.deleteAddresses(listId);
     }
 
     /**

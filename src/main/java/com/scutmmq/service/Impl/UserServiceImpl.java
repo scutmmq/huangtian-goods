@@ -37,7 +37,9 @@ import static com.scutmmq.utils.RedisConstants.*;
 @RequiredArgsConstructor
 public class UserServiceImpl extends ServiceImpl<UserMapper,User> implements UserService {
 
-    private  final  StringRedisTemplate stringRedisTemplate;
+    private final StringRedisTemplate stringRedisTemplate;
+
+    private final org.springframework.security.crypto.password.PasswordEncoder passwordEncoder;
 
     // B3 step6: 发布 UserMemory ProfileUpdated 事件
     private final ApplicationEventPublisher applicationEventPublisher;
@@ -47,36 +49,49 @@ public class UserServiceImpl extends ServiceImpl<UserMapper,User> implements Use
         // 查询数据库
         LoginType loginType = loginDTO.getLoginType();
         LambdaQueryChainWrapper<User> wrapper = lambdaQuery();
-        wrapper.select(User::getId,User::getNickName,User::getImage,User::getUsername);
+        wrapper.select(User::getId, User::getNickName, User::getImage, User::getUsername, User::getPassword);
         // 0用户名登录 1邮箱登录 2电话号码登录
-        if(loginType==LoginType.USERNAME){
-            wrapper.eq(User::getUsername,loginDTO.getLogin());
-        }else if(loginType==LoginType.EMAIL){
-            wrapper.eq(User::getEmail,loginDTO.getLogin());
-        }else if(loginType==LoginType.PHONE){
-            wrapper.eq(User::getPhone,loginDTO.getLogin());
+        if (loginType == LoginType.USERNAME) {
+            wrapper.eq(User::getUsername, loginDTO.getLogin());
+        } else if (loginType == LoginType.EMAIL) {
+            wrapper.eq(User::getEmail, loginDTO.getLogin());
+        } else if (loginType == LoginType.PHONE) {
+            wrapper.eq(User::getPhone, loginDTO.getLogin());
         }
 
-        wrapper.eq(User::getPassword,loginDTO.getPassword());
-        UserDTO userDTO = BeanUtil.copyProperties(wrapper.one(),UserDTO.class);
-        if(userDTO==null){
-            return  Result.error("账号不存在或者密码错误");
+        User user = wrapper.one();
+        if (user == null || user.getPassword() == null) {
+            return Result.error("账号不存在或者密码错误");
         }
 
+        boolean matches = passwordEncoder.matches(loginDTO.getPassword(), user.getPassword());
+        // 兼容存量明文密码并平滑升级至 BCrypt
+        if (!matches && Objects.equals(loginDTO.getPassword(), user.getPassword())) {
+            matches = true;
+            String encoded = passwordEncoder.encode(loginDTO.getPassword());
+            lambdaUpdate().set(User::getPassword, encoded).eq(User::getId, user.getId()).update();
+            user.setPassword(encoded);
+        }
 
-        log.info("{}登录成功!",userDTO.getNickName());
+        if (!matches) {
+            return Result.error("账号不存在或者密码错误");
+        }
+
+        UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);
+
+        log.info("{}登录成功!", userDTO.getNickName());
 
         // 设置token
-        Map<String,Object>claims =  new HashMap<>();
-        claims.put("id",userDTO.getId());
-        claims.put("nickName",userDTO.getNickName());
-        claims.put("image",userDTO.getImage());
-        claims.put("username",userDTO.getUsername());
-        String token =JwtUtils.generateJwtToken(claims);
+        Map<String, Object> claims = new HashMap<>();
+        claims.put("id", userDTO.getId());
+        claims.put("nickName", userDTO.getNickName());
+        claims.put("image", userDTO.getImage());
+        claims.put("username", userDTO.getUsername());
+        String token = JwtUtils.generateJwtToken(claims);
         userDTO.setToken(token);
 
         // 将token存入redis
-        stringRedisTemplate.opsForValue().set(TOKEN_KEY+token,USER_PERMISSION,TOKEN_EXPIRATION,TOKEN_TIME_UNIT);
+        stringRedisTemplate.opsForValue().set(TOKEN_KEY + token, USER_PERMISSION, TOKEN_EXPIRATION, TOKEN_TIME_UNIT);
 
         // 前端得到对象保存到localstorage
         return Result.success(userDTO);
@@ -88,57 +103,58 @@ public class UserServiceImpl extends ServiceImpl<UserMapper,User> implements Use
         // 获取用户携带的token
         final UserDTO user = UserHolder.getUser();
         String token = user.getToken();
-        log.info("退出登录,此时的token:{}",token);
+        log.info("退出登录,此时的token:{}", token);
 
         // 删除redis的token
         final Boolean deleted = stringRedisTemplate.delete(TOKEN_KEY + token);
 
         // 删除用户缓存
-        stringRedisTemplate.delete(CACHE_USER+user.getId());
+        stringRedisTemplate.delete(CACHE_USER + user.getId());
 
         // 更新最后一次登录时间
         final boolean updated = lambdaUpdate().set(User::getLastLogin, LocalDateTime.now()).eq(User::getId, user.getId()).update();
 
-
-        if(!deleted||!updated){
+        if (!deleted || !updated) {
             return Result.error("退出登录失败!");
         }
 
-
-        log.info("用户{}退出登录",user.getNickName());
+        log.info("用户{}退出登录", user.getNickName());
         return Result.success();
     }
 
     @Override
     public Result register(User user) {
         String nickName = user.getNickName();
-        if(nickName==null||nickName.isEmpty()){
+        if (nickName == null || nickName.isEmpty()) {
             nickName = SystemConstants.USER_NICK_NAME_PREFIX + RandomUtil.randomString(10).toLowerCase();
         }
         user.setNickName(nickName);
+        if (user.getPassword() != null && !user.getPassword().isEmpty()) {
+            user.setPassword(passwordEncoder.encode(user.getPassword()));
+        }
         save(user);
         return Result.success();
     }
 
     @Override
-    public Result getUser(){
+    public Result getUser() {
         Long id = UserHolder.getUser().getId();
 
         String jsonUser = stringRedisTemplate.opsForValue().get(CACHE_USER + id);
 
-        if(jsonUser==null||jsonUser.isEmpty()){
+        if (jsonUser == null || jsonUser.isEmpty()) {
             log.info("用户缓存未命中 ");
             final User user = getById(id);
 
-            UserVO userVO = BeanUtil.copyProperties(user,UserVO.class);
+            UserVO userVO = BeanUtil.copyProperties(user, UserVO.class);
 
             // 存入redis缓存
-            stringRedisTemplate.opsForValue().set(CACHE_USER+id,JSONUtil.toJsonStr(userVO),30, TimeUnit.MINUTES);
+            stringRedisTemplate.opsForValue().set(CACHE_USER + id, JSONUtil.toJsonStr(userVO), 30, TimeUnit.MINUTES);
 
             return Result.success(userVO);
         }
         log.info("用户缓存命中");
-         return  Result.success(JSONUtil.toBean(jsonUser,UserVO.class));
+        return Result.success(JSONUtil.toBean(jsonUser, UserVO.class));
     }
 
     @Override
@@ -150,18 +166,18 @@ public class UserServiceImpl extends ServiceImpl<UserMapper,User> implements Use
                 .set(user.getBirthday() != null, User::getBirthday, user.getBirthday())
                 .set(user.getNickName() != null && !user.getNickName().isEmpty(), User::getNickName, user.getNickName())
                 .set(user.getAddress() != null && !user.getAddress().isEmpty(), User::getAddress, user.getAddress())
-                .set(user.getImage()!=null&&!user.getImage().isEmpty(),User::getImage,user.getImage())
-                .set(user.getGender()!=null,User::getGender,user.getGender())
+                .set(user.getImage() != null && !user.getImage().isEmpty(), User::getImage, user.getImage())
+                .set(user.getGender() != null, User::getGender, user.getGender())
                 .set(User::getUpdatedTime, LocalDateTime.now())
-                .eq(User::getId,id)
+                .eq(User::getId, id)
                 .update();
-        if(!updated){
-            return  Result.error("更改失败");
+        if (!updated) {
+            return Result.error("更改失败");
         }
         // 更改成功
 
         // 删除原来的缓存
-        stringRedisTemplate.delete(CACHE_USER+id);
+        stringRedisTemplate.delete(CACHE_USER + id);
 
         // B3 step6: 发布资料更新事件 — AFTER_COMMIT 阶段由 UserMemoryEventListener 接收并重算偏好
         java.util.List<String> changedFields = new java.util.ArrayList<>();
@@ -175,32 +191,41 @@ public class UserServiceImpl extends ServiceImpl<UserMapper,User> implements Use
         applicationEventPublisher.publishEvent(
                 new com.scutmmq.ai.event.ProfileUpdatedEvent(this, id, changedFields));
 
-        return  Result.success();
+        return Result.success();
     }
 
     @Override
     public Result updatePassword(PasswordDTO passwordDTO) {
         Long id = UserHolder.getUser().getId();
         final User user = lambdaQuery().select(User::getPassword).eq(User::getId, id).one();
+        if (user == null) {
+            return Result.error("用户不存在");
+        }
 
-        if(!Objects.equals(passwordDTO.getOldPassword(), user.getPassword())){
+        boolean oldMatches = passwordEncoder.matches(passwordDTO.getOldPassword(), user.getPassword())
+                || Objects.equals(passwordDTO.getOldPassword(), user.getPassword());
+        if (!oldMatches) {
             return Result.error("旧密码错误！");
         }
-        if(Objects.equals(passwordDTO.getNewPassword(),user.getPassword())){
+
+        boolean newMatches = passwordEncoder.matches(passwordDTO.getNewPassword(), user.getPassword())
+                || Objects.equals(passwordDTO.getNewPassword(), user.getPassword());
+        if (newMatches) {
             return Result.error("新密码不许与旧密码相同!");
         }
 
-        final boolean updated = lambdaUpdate().set(User::getPassword, passwordDTO.getNewPassword()).eq(User::getId, id).update();
+        String encodedNewPassword = passwordEncoder.encode(passwordDTO.getNewPassword());
+        final boolean updated = lambdaUpdate().set(User::getPassword, encodedNewPassword).eq(User::getId, id).update();
 
-        if(!updated){
+        if (!updated) {
             return Result.error("修改失败，请联系客服");
         }
 
-        // 强行退出登录
-        stringRedisTemplate.delete(TOKEN_KEY+UserHolder.getUser().getToken());
+        // 强行退出登录并清理用户缓存
+        stringRedisTemplate.delete(TOKEN_KEY + UserHolder.getUser().getToken());
+        stringRedisTemplate.delete(CACHE_USER + id);
 
         return Result.success();
-
     }
 
     @Override
