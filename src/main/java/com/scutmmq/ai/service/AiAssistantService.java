@@ -228,8 +228,9 @@ public class AiAssistantService {
                     AgentOrchestrator.AgentResult result;
                     try {
                         // B2:带 runId/sessionId 的入口,让 CapabilityRegistry 发布的事件能精确关联到 ai_run 表
+                        // B4 Phase 1.6:currentMerchantId 暂传 null — session 上下文未接入,KnowledgeRecallInjector 兜底走 SearchFilter.all()
                         result = agentOrchestrator.runStreamingWithRun(user, history, userMessage,
-                                listener, runId, sessionId);
+                                listener, runId, sessionId, null);
                     } catch (Exception e) {
                         // runStreaming 自身异常路径里已经回调过 listener.onRunFailed()；
                         // 这里再保险一次——避免 orchestrator 抛 exception 在 listener 正常路径之外。

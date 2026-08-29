@@ -96,14 +96,15 @@ public class AgentOrchestrator {
     /**
      * 同步运行一次完整对话。
      *
-     * @param currentUser    当前商城登录用户
-     * @param history        会话历史（不含本次用户消息），顺序由旧到新
-     * @param userMessage    本次用户输入
+     * @param currentUser       当前商城登录用户
+     * @param history           会话历史（不含本次用户消息），顺序由旧到新
+     * @param userMessage       本次用户输入
+     * @param currentMerchantId 当前会话所在商家 ID（多租户 RAG 隔离，可为 null 表示全平台检索）
      * @return Agent 最终响应：含自然语言回复、可选草稿、本次产生的工具调用记录
      */
-    public AgentResult run(UserDTO currentUser, List<HistoryMessage> history, String userMessage) {
+    public AgentResult run(UserDTO currentUser, List<HistoryMessage> history, String userMessage, Long currentMerchantId) {
         List<Map<String, Object>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", promptProvider.buildSystemPrompt(currentUser)));
+        messages.add(Map.of("role", "system", "content", promptProvider.buildSystemPrompt(currentUser, userMessage, currentMerchantId)));
         for (HistoryMessage msg : history) {
             messages.add(Map.of("role", msg.role(), "content", msg.content() == null ? "" : msg.content()));
         }
@@ -222,25 +223,27 @@ public class AgentOrchestrator {
                                     List<HistoryMessage> history,
                                     String userMessage,
                                     OrchestratorListener listener) {
-        // 不携带 runId/sessionId 的旧入口,委托给新方法,事件用替代 ID 关联。
+        // 不携带 runId/sessionId / merchantId 的旧入口,委托给新方法,事件用替代 ID 关联。
         // AiAssistantService 已切到 runStreamingWithRun(...),这里仅作向下兼容。
-        return runStreamingWithRun(currentUser, history, userMessage, listener, null, null);
+        return runStreamingWithRun(currentUser, history, userMessage, listener, null, null, null);
     }
 
     /**
-     * 带 runId / sessionId 的流式运行入口。AiAssistantService 走这里,
-     * 让 CapabilityRegistry 发布的事件能精确关联到 ai_run / ai_session 表。
+     * 带 runId / sessionId / currentMerchantId 的流式运行入口。AiAssistantService 走这里,
+     * 让 CapabilityRegistry 发布的事件能精确关联到 ai_run / ai_session 表,同时下推当前商家上下文以支持多租户 RAG 隔离。
      *
      * <p>2026-08-23 阶段 2 重构:344 行主循环全权委托给 {@link StreamingOrchestrator},
      * AgentOrchestrator 只剩装配 + 入口转发。
+     * <p>2026-08-30 B4 Phase 1.6 扩展:新增 {@code currentMerchantId} 参数下推至 system prompt 三参版本。
      */
     public AgentResult runStreamingWithRun(UserDTO currentUser,
                                            List<HistoryMessage> history,
                                            String userMessage,
                                            OrchestratorListener listener,
                                            String runId,
-                                           String sessionId) {
-        return streamingOrchestrator.runStreaming(currentUser, history, userMessage, listener, runId, sessionId);
+                                           String sessionId,
+                                           Long currentMerchantId) {
+        return streamingOrchestrator.runStreaming(currentUser, history, userMessage, listener, runId, sessionId, currentMerchantId);
     }
 
     /**

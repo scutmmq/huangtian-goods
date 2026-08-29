@@ -82,18 +82,20 @@ public class StreamingOrchestrator {
      *
      * @param currentUser 当前商城登录用户
      * @param history     会话历史(不含本次用户消息)
-     * @param userMessage 本次用户输入
-     * @param listener    事件回调
-     * @param runId       关联 ai_run.id(可能为 null)
-     * @param sessionId   关联 ai_session.id(可能为 null)
+     * @param userMessage       本次用户输入
+     * @param listener          事件回调
+     * @param runId             关联 ai_run.id(可能为 null)
+     * @param sessionId         关联 ai_session.id(可能为 null)
+     * @param currentMerchantId 当前会话所在商家 ID(多租户 RAG 隔离,可为 null)
      */
     public AgentOrchestrator.AgentResult runStreaming(UserDTO currentUser,
                                                        List<AgentOrchestrator.HistoryMessage> history,
                                                        String userMessage,
                                                        OrchestratorListener listener,
                                                        String runId,
-                                                       String sessionId) {
-        List<Map<String, Object>> messages = assembleMessages(currentUser, history, userMessage);
+                                                       String sessionId,
+                                                       Long currentMerchantId) {
+        List<Map<String, Object>> messages = assembleMessages(currentUser, history, userMessage, currentMerchantId);
         List<AgentToolDefinition> tools = skillRegistry.listDefinitions();
         List<AgentOrchestrator.ToolExecutionRecord> executions = new ArrayList<>();
         AgentToolResult.DraftPayload draft = null;
@@ -292,9 +294,11 @@ public class StreamingOrchestrator {
 
     private List<Map<String, Object>> assembleMessages(UserDTO currentUser,
                                                      List<AgentOrchestrator.HistoryMessage> history,
-                                                     String userMessage) {
+                                                     String userMessage,
+                                                     Long currentMerchantId) {
         List<Map<String, Object>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", promptProvider.buildSystemPrompt(currentUser)));
+        // B4 Phase 1.6:三参 buildSystemPrompt 支持多租户 RAG 商家上下文隔离
+        messages.add(Map.of("role", "system", "content", promptProvider.buildSystemPrompt(currentUser, userMessage, currentMerchantId)));
         for (AgentOrchestrator.HistoryMessage msg : history) {
             messages.add(Map.of("role", msg.role(), "content", msg.content() == null ? "" : msg.content()));
         }
