@@ -298,3 +298,143 @@ while (!Thread.currentThread().isInterrupted()) {
   > 3. **线程工厂**：自主实现 `NamedThreadFactory`，利用 `AtomicInteger` 规范设置带有业务含义的线程名前缀（如 `mall-async-1`、`order-timeout-scan-1`），方便线上排查与 Arthas 诊断；
   > 4. **拒绝策略**：核心业务选用 `CallerRunsPolicy`，当队列打满时由调用线程代劳执行，形成轻量级反压机制，不丢弃任务；
   > 5. **优雅停机与隔离**：通过 `@PreDestroy` 配合 `shutdown()` 与 `awaitTermination(5s)` 保证停机时不丢失未完成任务，并对 AI 对话和画像提取实施了**独立线程池物理隔离**，防止非核心任务拖垮主链路。”
+
+---
+
+## 七、 Java 三大并发控制手段深度对比：synchronized vs ReentrantLock vs 原子类 CAS (含银行高并发编程真题实战)
+
+### 7.1 三大并发控制手段的核心特征与通俗比喻
+
+| 对比维度 | `synchronized` (内置锁) | `ReentrantLock` (显式锁) | 原子类 `AtomicXxx` / CAS (无锁) |
+| :--- | :--- | :--- | :--- |
+| **底层原理** | JVM 关键字，基于对象监视器（`Monitor`：`monitorenter` / `monitorexit`），底层依赖 OS Mutex 互斥原语。 | JUC 提供的类，基于 **AQS（AbstractQueuedSynchronizer）** 同步队列与 `LockSupport.park()/unpark()`。 | 基于 CPU 硬件指令 **`CAS (Compare-And-Swap / cmpxchg)`** 实现的**乐观无锁（Lock-Free）**机制。 |
+| **锁的哲学** | **悲观锁**（认为冲突极高，每次都加锁并阻塞其他线程）。 | **悲观锁**（依然需要获取锁，但提供了超时、中断等灵活性）。 | **乐观锁**（认为冲突不高，先尝试直接修改，失败则自旋重试）。 |
+| **线程状态** | 未获取到锁的线程进入 `BLOCKED` 阻塞态，触发**操作系统上下文切换（从用户态陷入内核态）**。 | 未获取到锁的线程进入 `WAITING` 状态（在 AQS 队列排队休眠），同样涉及上下文切换。 | **线程不休眠、不阻塞！** 保持 `RUNNING` 状态在 CPU 上快速自旋重试，**零线程切换开销**。 |
+| **性能表现** | 低并发下偏向锁/轻量级锁较快，**极高并发下吞吐急剧下降**。 | 高并发下比早期 synchronized 略优，但依然受限于锁竞争。 | **在简单读写/数值更新场景下吞吐最高（快一个数量级）**。 |
+| **通俗生活比喻** | **银行传统单一柜台**：每次只让一个人进小房间办业务，门外排长队，进出都要向保安（操作系统）报备登记。 | **VIP 预约制柜台**：依然是一次进一人，但可以设置“如果排队超过 5 分钟我就走（`tryLock`）”或者“根据排队号顺序叫号（公平锁）”。 | **自助自动取款机（ATM）群**：每个人直接插卡操作。如果按确认时发现屏幕显示“数据已被别人更新了”，机器自动帮你重新读一次并刷新屏幕（CAS 自旋重试），无需保安干预。 |
+
+---
+
+### 7.2 为什么笔试题说“银行系统不要用 synchronized / ReentrantLock，而建议用原子类”？
+
+* **原因 1：避免高频上下文切换与 CPU 性能雪崩**  
+  在极高并发的银行账户充值/扣款场景中，使用 `synchronized` 或 `ReentrantLock` 会导致成千上万个线程陷入**阻塞（Blocked/Waiting）**。CPU 大量时间都在“挂起线程 $\rightarrow$ 保存现场 $\rightarrow$ 唤醒线程 $\rightarrow$ 恢复现场”的上下文切换上，有效业务处理时间严重被压缩。
+* **原因 2：原子类 CAS 的“非阻塞性（Non-blocking）”天然抗并发**  
+  `AtomicLong` / `AtomicInteger` 使用 CPU 底层的原子指令 `CMPXCHG`。线程直接在用户态完成内存比对与交换，失败了立刻循环再次尝试，既保证了**绝对的线程安全与数值准确**，又避免了任何操作系统级别的线程挂起。
+
+---
+
+### 7.3 银行账户高并发编程题 · 满分代码实现 (Java 经典笔试题)
+
+#### 题目要求：
+实现一个线程安全的银行账户 `BankAccount`，支持高并发下的 `deposit`（存款）、`withdraw`（取款，余额不足返回 false）、`getBalance`（查余额）以及账户间 `transfer`（转账）。
+
+```java
+import java.util.concurrent.atomic.AtomicLong;
+
+/**
+ * 高并发线程安全银行账户实现 (使用 CAS 原子类，零阻塞)
+ */
+public class BankAccount {
+    private final String accountId;
+    // 使用 AtomicLong 存储账户余额 (单位: 分，避免浮点精度损失)
+    private final AtomicLong balance;
+
+    public BankAccount(String accountId, long initialBalance) {
+        if (initialBalance < 0) {
+            throw new IllegalArgumentException("初始余额不能为负数");
+        }
+        this.accountId = accountId;
+        this.balance = new AtomicLong(initialBalance);
+    }
+
+    /**
+     * 1. 高并发存款 (Deposit)
+     * 利用 CAS 原子累加，线程安全且无锁
+     */
+    public void deposit(long amount) {
+        if (amount <= 0) {
+            throw new IllegalArgumentException("存款金额必须大于0");
+        }
+        // 底层直接调用 Unsafe 的 getAndAddLong (CAS 实现)
+        balance.addAndGet(amount);
+    }
+
+    /**
+     * 2. 高并发取款 (Withdraw) - 核心考点!
+     * 必须保证: ① 余额充足才扣减; ② 并发下不能扣成负数 (防超卖/防透支)
+     */
+    public boolean withdraw(long amount) {
+        if (amount <= 0) {
+            throw new IllegalArgumentException("取款金额必须大于0");
+        }
+
+        // 使用 CAS 自旋循环 (Spin Lock Pattern)
+        while (true) {
+            long current = balance.get(); // 1. 读取当前最新余额 (volatile 语义保证可见性)
+            if (current < amount) {
+                return false; // 余额不足，直接安全返回 false
+            }
+            long next = current - amount;
+            // 2. 尝试原子更新: 如果内存中的当前值依然是 current，则将其更新为 next
+            if (balance.compareAndSet(current, next)) {
+                return true; // CAS 成功，扣款完成
+            }
+            // 3. 若 CAS 失败(说明有并发线程抢先修改了余额)，循环自旋重试
+        }
+    }
+
+    /**
+     * 3. 查询余额 (GetBalance)
+     */
+    public long getBalance() {
+        return balance.get();
+    }
+
+    public String getAccountId() {
+        return accountId;
+    }
+
+    /**
+     * 4. 账户间转账 (Transfer) - 死锁防范与原子保障
+     * 思考: 从 A 转账给 B。如果纯靠 CAS，跨账户的两阶段操作难以保证原子性。
+     * 若使用锁，当 线程1做 A->B，线程2做 B->A 时，容易发生死锁!
+     * 满分解法: "按账户 ID 顺序加锁 (Lock Ordering)"
+     */
+    public static boolean transfer(BankAccount from, BankAccount to, long amount) {
+        if (from == null || to == null || from == to) {
+            return false;
+        }
+        if (amount <= 0) {
+            throw new IllegalArgumentException("转账金额必须大于0");
+        }
+
+        // 避免死锁: 永远按照 accountId 的字符串字典序先后加锁
+        BankAccount firstLock = from.accountId.compareTo(to.accountId) < 0 ? from : to;
+        BankAccount secondLock = from.accountId.compareTo(to.accountId) < 0 ? to : from;
+
+        synchronized (firstLock) {
+            synchronized (secondLock) {
+                // 在锁定后执行原子扣减与增加
+                if (from.withdraw(amount)) {
+                    to.deposit(amount);
+                    return true;
+                }
+                return false; // 余额不足转账失败
+            }
+        }
+    }
+}
+```
+
+---
+
+### 7.4 进阶考点：CAS 的两大缺陷与解决方案
+
+1. **ABA 问题（笔试常考）**：
+   - *问题描述*：线程 1 读到余额为 100，准备改成 50。此时线程 2 把 100 改成 200，线程 3 又把 200 改回 100。线程 1 执行 CAS 时发现依然是 100，成功修改。但实际上数据已经被修改过两次！
+   - *解决方案*：引入**版本号（Stamp / Version）**，Java 提供了 **`AtomicStampedReference`**（每次修改不仅比对值，还比对版本号 `[Value, Stamp]`，解决 ABA）。
+2. **高并发自旋 CPU 空转与 `LongAdder` 极致优化（JDK 8）**：
+   - *问题描述*：当有上万并发线程同时执行 `deposit` 时，大量线程 CAS 失败并无限 `while(true)` 自旋，会导致 CPU 使用率飙高。
+   - *解决方案*：如果是纯高并发累加/统计场景，可以使用 JDK 8 的 **`LongAdder`**！
+   - *`LongAdder` 底层原理*：**分段累加（空间换时间 / Cell 数组）**。当单 Key CAS 发生激烈冲突时，自动将线程哈希分散到不同的 `Cell` 桶中独立累加，最终 `sum()` 时汇总所有 Cell 的值，吞吐量比 `AtomicLong` 高出近一个数量级！

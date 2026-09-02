@@ -166,6 +166,17 @@ $$\mathbf{RUNNING} \xrightarrow{\text{shutdownNow()}} \mathbf{STOP} \xrightarrow
 
 ---
 
+### 4. `synchronized` vs `ReentrantLock` vs 原子类 CAS 核心对比（银行高并发编程题考点）
+| 对比维度 | `synchronized` (内置锁) | `ReentrantLock` (显式锁) | 原子类 `AtomicXxx` / CAS (无锁) |
+| :--- | :--- | :--- | :--- |
+| **底层实现** | JVM 关键字，Monitor 监视器 (`monitorenter/exit`)，依赖 OS Mutex | JUC 类，基于 **AQS 同步队列** 与 `LockSupport.park()/unpark()` | 基于 CPU 硬件指令 **`CAS (CMPXCHG)`**，非阻塞乐观自旋 |
+| **高并发性能** | 阻塞锁，导致成千上万线程挂起陷入内核态，**上下文切换开销巨大** | 依然是悲观阻塞锁，支持公平/非公平/超时 `tryLock` | **最高！线程不休眠不阻塞**，在用户态直接自旋重试完成更新 |
+| **银行高并发推荐** | ❌ 吞吐量低，容易阻塞 | ❌ 依然有线程挂起开销 | ✅ **极力推荐（`AtomicLong` / `LongAdder`）** |
+| **高并发累加首选** | 单 Key 锁竞争激烈 | 单 Key 锁竞争激烈 | **`LongAdder`（分段累加 Cell 数组，吞吐量比 AtomicLong 高一个数量级）** |
+| **ABA 问题与解法** | 无 ABA 问题 | 无 ABA 问题 | 存在 ABA 问题，使用 **`AtomicStampedReference`（加版本号）** 解决 |
+
+---
+
 ## 🔢 模块四：树、图结构与核心数学计算公式（笔试必考计算题）
 
 ### 1. 二叉树节点关系计算（笔试常考单选题）
