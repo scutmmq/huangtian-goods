@@ -7,27 +7,29 @@
 
 ## 目录索引 (Table of Contents)
 
-* [一、 Spring Framework 核心底层三大支柱](#一-spring-framework-核心底层三大支柱)
-  * [1.1 IoC 容器刷新流程（`refresh()` 核心阶段）](#11-ioc-容器刷新流程refresh-核心阶段)
-  * [1.2 Bean 的完整生命周期（四步记忆法）](#12-bean-的完整生命周期四步记忆法)
-  * [1.3 三级缓存与循环依赖底层破解](#13-三级缓存与循环依赖底层破解)
-  * [1.4 AOP 动态代理原理（JDK Proxy vs CGLIB）与 6 大事务失效场景](#14-aop-动态代理原理jdk-proxy-vs-cglib与-6-大事务失效场景)
-* [二、 Spring Boot 核心机制与自动化装配](#二-spring-boot-核心机制与自动化装配)
-  * [2.1 `@SpringBootApplication` 组合元注解深度剖析](#21-springbootapplication-组合元注解深度剖析)
-  * [2.2 自动装配（Auto-Configuration）SPI 加载机制](#22-自动装配auto-configurationspi-加载机制)
-  * [2.3 条件装配 `@ConditionalOnXxx` 原理](#23-条件装配-conditionalonxxx-原理)
-  * [2.4 自定义 Starter 的核心步骤与规范](#24-自定义-starter-的核心步骤与规范)
-* [三、 Spring Cloud 微服务生态与组件底层原理](#三-spring-cloud-微服务生态与组件底层原理)
-  * [3.1 服务注册与发现：Nacos / Eureka 底层心跳与注册表机制](#31-服务注册与发现nacos--eureka-底层心跳与注册表机制)
-  * [3.2 负载均衡：LoadBalancer / Ribbon 核心算法与原理](#32-负载均衡loadbalancer--ribbon-核心算法与原理)
-  * [3.3 声明式调用：OpenFeign 动态代理与编码解码链路](#33-声明式调用openfeign-动态代理与编码解码链路)
-  * [3.4 流量防护：Sentinel 滑动窗口限流与熔断降级](#34-流量防护sentinel-滑动窗口限流与熔断降级)
-  * [3.5 动态配置中心：Nacos 长轮询（Long Polling）秒级推拉机制](#35-动态配置中心nacos-长轮询long-polling秒级推拉机制)
-  * [3.6 微服务网关：Spring Cloud Gateway 反应式过滤器链](#36-微服务网关spring-cloud-gateway-反应式过滤器链)
-* [四、 结合本项目源码的 Spring 生产实战深度复盘](#四-结合本项目源码的-spring-生产实战深度复盘)
-  * [4.1 AOP 事务自调用失效与 `REQUIRES_NEW` 独立类解耦（KnowledgeIngestTxService）](#41-aop-事务自调用失效与-requires_new-独立类解耦knowledgeingesttxservice)
-  * [4.2 双拦截器链无感刷新设计（LoginInterceptor + RefreshTokenInterceptor）](#42-双拦截器链无感刷新设计logininterceptor--refreshtokeninterceptor)
-  * [4.3 Spring 事件驱动解耦（ApplicationEventPublisher）](#43-spring-事件驱动解耦applicationeventpublisher)
+> 💡 **飞书导入提示**：导入飞书文档后，在任意空行输入 `/目录` 即可一键生成飞书原生交互式大纲目录，无需手动维护跳转锚点。
+
+* **一、 Spring Framework 核心底层三大支柱**
+  * **1.1 IoC 容器刷新流程（`refresh()` 核心阶段）**
+  * **1.2 Bean 的完整生命周期（四步记忆法）**
+  * **1.3 三级缓存与循环依赖底层破解**
+  * **1.4 AOP 动态代理原理（JDK Proxy vs CGLIB）与 6 大事务失效场景**
+* **二、 Spring Boot 核心机制与自动化装配**
+  * **2.1 `@SpringBootApplication` 组合元注解深度剖析**
+  * **2.2 自动装配（Auto-Configuration）SPI 加载机制**
+  * **2.3 条件装配 `@ConditionalOnXxx` 原理**
+  * **2.4 自定义 Starter 的核心步骤与规范**
+* **三、 Spring Cloud 微服务生态与组件底层原理**
+  * **3.1 服务注册与发现：Nacos / Eureka 底层心跳与注册表机制**
+  * **3.2 负载均衡：LoadBalancer / Ribbon 核心算法与原理**
+  * **3.3 声明式调用：OpenFeign 动态代理与编码解码链路**
+  * **3.4 流量防护：Sentinel 滑动窗口限流与熔断降级**
+  * **3.5 动态配置中心：Nacos 长轮询（Long Polling）秒级推拉机制**
+  * **3.6 微服务网关：Spring Cloud Gateway 反应式过滤器链**
+* **四、 结合本项目源码的 Spring 生产实战深度复盘**
+  * **4.1 AOP 事务自调用失效与 `REQUIRES_NEW` 独立类解耦（KnowledgeIngestTxService）**
+  * **4.2 双拦截器链无感刷新设计（LoginInterceptor + RefreshTokenInterceptor）**
+  * **4.3 Spring 事件驱动解耦（ApplicationEventPublisher）**
 
 ---
 

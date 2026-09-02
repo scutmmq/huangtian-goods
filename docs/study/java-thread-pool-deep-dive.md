@@ -8,19 +8,21 @@
 
 ## 目录索引 (Table of Contents)
 
-* [一、 为什么要有线程池？（从 OS 与 JVM 底层成本讲起）](#一-为什么要有线程池从-os-与-jvm-底层成本讲起)
-* [二、 ThreadPoolExecutor 七大核心参数（极通俗大白话拆解）](#二-threadpoolexecutor-七大核心参数极通俗大白话拆解)
-* [三、 线程池四大阶段执行流程（经典避坑与执行状态机）](#三-线程池四大阶段执行流程经典避坑与执行状态机)
-* [四、 四种原生拒绝策略与生产选择](#四-四种原生拒绝策略与生产选择)
-* [五、 为什么《阿里巴巴 Java 开发手册》强制禁止使用 Executors？](#五-为什么阿里巴巴-java-开发手册强制禁止使用-executors)
-* [六、 深度拆解本项目 Commit `1524f78` 真实重构实战](#六-深度拆解本项目-commit-1524f78-真实重构实战)
-* [七、 Java 三大并发控制手段深度对比：synchronized vs ReentrantLock vs 原子类 CAS (含银行高并发编程真题实战)](#七-java-三大并发控制手段深度对比synchronized-vs-reentrantlock-vs-原子类-cas-含银行高并发编程真题实战)
-* [八、 Java 创建多线程的 4 种方式与底层本质](#八-java-创建多线程的-4-种方式与底层本质)
-* [九、 并发三大特性（原子性、可见性、有序性）与各大工具保障全景表](#九-并发三大特性原子性可见性有序性与各大工具保障全景表)
-* [十、 Java 内存模型 (JMM) 与 8 大 Happens-Before 规则](#十-java-内存模型-jmm-与-8-大-happens-before-规则)
-* [十一、 JUC 核心并发工具“四剑客”通俗实战与比喻 (CountDownLatch / CyclicBarrier / Semaphore / CompletableFuture)](#十一-juc-核心并发工具四剑客通俗实战与比喻)
-* [十二、 ThreadLocal 底层原理、内存泄漏与强弱引用深度剖析](#十二-threadlocal-底层原理内存泄漏与强弱引用深度剖析)
-* [十三、 死锁（Deadlock）的产生条件、排查诊断与破局策略](#十三-死锁deadlock的产生条件排查诊断与破局策略)
+> 💡 **飞书导入提示**：导入飞书文档后，在任意空行输入 `/目录` 即可一键生成飞书原生交互式大纲目录，无需手动维护跳转锚点。
+
+* **一、 为什么要有线程池？（从 OS 与 JVM 底层成本讲起）**
+* **二、 ThreadPoolExecutor 七大核心参数（极通俗大白话拆解）**
+* **三、 线程池四大阶段执行流程（经典避坑与执行状态机）**
+* **四、 四种原生拒绝策略与生产选择**
+* **五、 为什么《阿里巴巴 Java 开发手册》强制禁止使用 Executors？**
+* **六、 深度拆解本项目 Commit `1524f78` 真实重构实战**
+* **七、 Java 三大并发控制手段深度对比：synchronized vs ReentrantLock vs 原子类 CAS (含银行高并发编程真题实战)**
+* **八、 Java 创建多线程的 4 种方式与底层本质**
+* **九、 并发三大特性（原子性、可见性、有序性）与各大工具保障全景表**
+* **十、 Java 内存模型 (JMM) 与 8 大 Happens-Before 规则**
+* **十一、 JUC 核心并发工具“四剑客”通俗实战与比喻 (CountDownLatch / CyclicBarrier / Semaphore / CompletableFuture)**
+* **十二、 ThreadLocal 底层原理、内存泄漏与强弱引用深度剖析**
+* **十三、 死锁（Deadlock）的产生条件、排查诊断与破局策略**
 
 ---
 
