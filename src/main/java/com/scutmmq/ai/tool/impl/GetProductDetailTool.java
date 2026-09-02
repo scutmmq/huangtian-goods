@@ -64,11 +64,8 @@ public class GetProductDetailTool implements MallAgentTool {
         }
 
         Result result = productService.getProductDetail(productId);
-        if (result == null) {
-            return AgentToolResult.ofText("未找到商品。");
-        }
-        if (result.getCode() == null || result.getCode() != 1) {
-            return AgentToolResult.ofText("查询失败: " + result.getMsg());
+        if (result == null || result.getCode() == null || result.getCode() != 1 || result.getData() == null) {
+            return AgentToolResult.ofText("商品 ID=" + productId + " 不存在。严禁捏造该商品，请调用 search_products 搜索真实商品。");
         }
         try {
             return AgentToolResult.ofText(objectMapper.writeValueAsString(result.getData()));

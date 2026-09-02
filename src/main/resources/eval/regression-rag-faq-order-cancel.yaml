@@ -1,0 +1,13 @@
+# B4 RAG 回归测试 3: 待付款与待发货订单取消
+name: regression-rag-faq-order-cancel
+message: "我刚下的订单可以取消或者修改收货地址吗？"
+expectReplyNoDsml: true
+expectKeywords:
+  - "取消"
+  - "订单"
+  - "修改"
+  - "待付款"
+  - "待发货"
+  - "地址"
+expectMaxToolExecutions: 2
+userId: 1

@@ -48,7 +48,7 @@ public class DraftAddCartItemTool implements MallAgentTool {
                 .build();
         return AgentToolDefinition.builder()
                 .name(NAME)
-                .description("生成「加入购物车」草稿。用户表达「加入购物车」意图时使用。等待用户在卡片上确认后才会真正调用。")
+                .description("生成「加入购物车」草稿卡片。当用户想加入购物车时必须调用本工具。只有调用本工具前端才会弹出「确认加入购物车」卡片与按钮供用户点击。")
                 .parameters(parameters)
                 .build();
     }

@@ -1,0 +1,12 @@
+# B4 RAG 回归测试 4: 电子发票开具与下载
+name: regression-rag-faq-invoice
+message: "商城购买商品怎么开电子发票？发票什么时候能开出来？"
+expectReplyNoDsml: true
+expectKeywords:
+  - "发票"
+  - "电子发票"
+  - "开具"
+  - "订单"
+  - "下载"
+expectMaxToolExecutions: 2
+userId: 1

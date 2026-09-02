@@ -19,6 +19,7 @@ import com.scutmmq.ai.tool.impl.DraftCreateOrderTool;
 import com.scutmmq.ai.tool.impl.DraftRegisterMerchantTool;
 import com.scutmmq.ai.tool.impl.DraftUpdateMerchantTool;
 import com.scutmmq.ai.tool.impl.DraftUpdateUserProfileTool;
+import com.scutmmq.ai.util.DsmlSanitizer;
 import com.scutmmq.ai.util.MallUserContextExecutor;
 import com.scutmmq.dto.CartsDTO;
 import com.scutmmq.dto.OrderItemsDTO;
@@ -304,21 +305,24 @@ public class AiAssistantService {
             List<AiMessage> recent = aiMessageService.listRecentBySession(
                     sessionId, Math.max(1, properties.getMaxHistoryMessages()));
             List<AgentOrchestrator.HistoryMessage> history = new ArrayList<>();
-            int toolPiggybackCount = 0;
             for (AiMessage m : recent) {
                 if (excludeUserMsgId != null && excludeUserMsgId.equals(m.getId())) {
                     continue;
                 }
-                if ("user".equals(m.getRole()) || "assistant".equals(m.getRole())) {
-                    history.add(new AgentOrchestrator.HistoryMessage(m.getRole(), m.getContent()));
-                } else if ("tool".equals(m.getRole())) {
-                    String wrapped = "[上一轮工具调用结果，可直接复用，不要重新搜索] " + safeTruncate(m.getContent(), 1200);
-                    history.add(new AgentOrchestrator.HistoryMessage("user", wrapped));
-                    toolPiggybackCount++;
+                String role = m.getRole();
+                String content = DsmlSanitizer.strip(m.getContent());
+                if ("user".equals(role)) {
+                    if (!content.isBlank()) {
+                        history.add(new AgentOrchestrator.HistoryMessage("user", content));
+                    }
+                } else if ("assistant".equals(role)) {
+                    if (!content.isBlank()) {
+                        history.add(new AgentOrchestrator.HistoryMessage("assistant", content));
+                    }
                 }
             }
-            log.info("[AI][RUN] history loaded runId={} db={} sentToModel={} (含 {} 条工具结果回放)",
-                    runId, recent.size(), history.size(), toolPiggybackCount);
+            log.info("[AI][RUN] history loaded runId={} db={} sentToModel={}",
+                    runId, recent.size(), history.size());
             return history;
         }
 

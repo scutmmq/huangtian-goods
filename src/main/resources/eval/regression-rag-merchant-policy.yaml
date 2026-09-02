@@ -1,0 +1,12 @@
+# B4 RAG 回归测试 8: 店铺服务与联系方式咨询
+name: regression-rag-merchant-policy
+message: "请问小米专营店的服务和配送地址是在哪里？"
+expectReplyNoDsml: true
+expectKeywords:
+  - "店铺"
+  - "小米"
+  - "专营店"
+  - "配送"
+  - "服务"
+expectMaxToolExecutions: 2
+userId: 1

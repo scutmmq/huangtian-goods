@@ -48,4 +48,7 @@ public class RedisConstants {
     public static final String MEMORY_PARTITION_DROP_LOCK_KEY = "lock:memory:partition:drop";
     /** cron 跨实例共享进度:最近一次批处理时间戳 (epoch ms);watchdog 据此检测僵死。 */
     public static final String MEMORY_CRON_PROGRESS_KEY = "ai:memory:cron:progress";
+
+    // B4 AI RAG 知识库
+    public static final String RAG_INGEST_CRON_LOCK_KEY = "lock:rag:ingest:cron";
 }

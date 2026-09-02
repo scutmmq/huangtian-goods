@@ -37,6 +37,7 @@ ai:
     flags:
       observability: false    # 启用后:Run 用量落 ai_run_usage + 延迟日志
       eval: false             # 启用后:启用 EvalRunner(/dev/ai/eval/run)
+      rag: false              # B4 启用后:启用 RAG 知识库与规则问答系统
   observability:
     cost-per-1k-prompt-tokens: 0
     cost-per-1k-completion-tokens: 0
@@ -55,6 +56,19 @@ ai:
     audit-purge-rate-rows-per-sec: 100
     local-rate-limit-per-user: 1
     local-rate-limit-burst: 200
+  # B4:RAG 知识库与规则问答系统配置
+  rag:
+    enabled: false
+    embedding-provider: "${AI_EMBEDDING_PROVIDER:dashscope}"
+    embedding-url: "${AI_EMBEDDING_URL:https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings}"
+    embedding-api-key: "${AI_EMBEDDING_API_KEY:}"
+    embedding-model: "${AI_EMBEDDING_MODEL:text-embedding-v3}"
+    embedding-dimension: 1024
+    top-k: 3
+    min-score: 0.65
+    ingest-cron: "0 0 4 * * ?"
+    cache-ttl-hours: 24
+    rate-limit-per-second: 20
 
 # B3 step0:Prometheus 指标端点(供后续 AI 长期记忆指标上报使用)
 management:

@@ -14,6 +14,7 @@ import com.scutmmq.ai.tool.AgentToolCall;
 import com.scutmmq.ai.tool.AgentToolDefinition;
 import com.scutmmq.ai.tool.AgentToolResult;
 import com.scutmmq.ai.util.DsmlSanitizer;
+import com.scutmmq.ai.util.StreamingThinkFilter;
 import com.scutmmq.dto.UserDTO;
 import lombok.extern.slf4j.Slf4j;
 
@@ -139,15 +140,15 @@ public class StreamingOrchestrator {
                 StringBuilder reasoningBuilder = new StringBuilder();
                 List<AgentToolCall> toolCalls = new ArrayList<>();
                 AtomicBoolean streamFailed = new AtomicBoolean(false);
+                StreamingThinkFilter thinkFilter = new StreamingThinkFilter();
 
                 aiChatClient.streamChatCompletion(messages, tools, new StreamChunkListener() {
                     @Override
                     public void onContentDelta(String delta) {
                         if (delta == null || delta.isEmpty()) return;
-                        // C6:源头剔除 DSML,让 replyBuilder / safeOnAssistantDelta listener / 后续 finalReply 全干净
-                        String clean = DsmlSanitizer.strip(delta);
+                        // 过滤 think 标签与 DSML 标签,让 replyBuilder / safeOnAssistantDelta listener 全干净
+                        String clean = thinkFilter.filter(delta, reasoningBuilder);
                         if (clean.isEmpty()) {
-                            safeOnAssistantDelta(listener, "", replyBuilder.length());
                             return;
                         }
                         replyBuilder.append(clean);
@@ -184,7 +185,7 @@ public class StreamingOrchestrator {
                     throw new RuntimeException("AI stream failed (see previous log)");
                 }
 
-                String reply = replyBuilder.toString();
+                String reply = DsmlSanitizer.strip(replyBuilder.toString());
                 String reasoning = reasoningBuilder.toString();
                 log.info("[AI][ORCH][STREAM] model iteration done in {}ms: contentLen={} toolCalls={} hasReasoning={}",
                         System.currentTimeMillis() - t0,
@@ -200,12 +201,19 @@ public class StreamingOrchestrator {
                     break;
                 }
 
+                // 确保所有有效工具调用都有唯一且一致的 id，并过滤非法空调用
+                toolCalls.removeIf(tc -> tc.getName() == null || tc.getName().isBlank());
+                for (AgentToolCall call : toolCalls) {
+                    if (call.getId() == null || call.getId().isBlank()) {
+                        call.setId("call_" + System.nanoTime());
+                    }
+                }
+
                 // 追加 assistant 消息(走 ModelMessageBuilder)
                 messages.add(messageBuilder.buildAssistantToolCallMessage(reply, toolCalls,
                         reasoning.isEmpty() ? null : reasoning));
 
-                // C11 安全网 + C8 重复拦截:全部交给 ToolExecutionDispatcher
-                toolDispatcher.filterPhantoms(toolCalls);
+                // 执行调度并追加 tool 响应消息
                 ToolExecutionDispatcher.ExecutionResult dispatchResult =
                         toolDispatcher.dispatch(toolCalls, listener, currentUser, runCtx);
 
@@ -227,17 +235,14 @@ public class StreamingOrchestrator {
                 log.warn("[AI][ORCH][STREAM] reached maxIter={} with pending tool flow, forcing final text answer", maxIter);
                 StringBuilder forcedReply = new StringBuilder();
                 AtomicBoolean forcedFailed = new AtomicBoolean(false);
+                StreamingThinkFilter forcedThinkFilter = new StreamingThinkFilter();
                 try {
                     aiChatClient.streamChatCompletion(messages, List.of(), new StreamChunkListener() {
                         @Override
                         public void onContentDelta(String delta) {
                             if (delta == null || delta.isEmpty()) return;
-                            // C6:强制收尾阶段也走同一 sanitize
-                            String clean = DsmlSanitizer.strip(delta);
-                            if (clean.isEmpty()) {
-                                safeOnAssistantDelta(listener, "", forcedReply.length());
-                                return;
-                            }
+                            String clean = forcedThinkFilter.filter(delta, null);
+                            if (clean.isEmpty()) return;
                             forcedReply.append(clean);
                             safeOnAssistantDelta(listener, clean, forcedReply.length() - clean.length());
                         }
@@ -250,7 +255,7 @@ public class StreamingOrchestrator {
                         }
                     });
                     if (!forcedFailed.get()) {
-                        String forced = forcedReply.toString();
+                        String forced = DsmlSanitizer.strip(forcedReply.toString());
                         if (!forced.isEmpty()) {
                             replyRef[0] = forced;
                         }

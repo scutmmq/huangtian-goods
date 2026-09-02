@@ -62,7 +62,7 @@ public class JwtInterceptorSecurityTest {
     }
 
     @Test
-    void testPreHandleThrowsExceptionOnExpiredJwtToken() {
+    void testPreHandlePassesSilentlyOnExpiredJwtToken() throws Exception {
         // 创建一个已过期的 token
         SecretKey key = Keys.hmacShaKeyFor("woainizhongguoqinaidemuqinwoweiniliulei".getBytes());
         String expiredToken = Jwts.builder()
@@ -73,20 +73,19 @@ public class JwtInterceptorSecurityTest {
 
         when(request.getHeader("Authorization")).thenReturn(expiredToken);
 
-        AuthorizeException ex = assertThrows(AuthorizeException.class, () ->
-                refreshInterceptor.preHandle(request, response, new Object())
-        );
-        assertEquals("登录已过期，请重新登录", ex.getMessage());
+        // 双拦截器架构：第一层 RefreshInterceptor 静默放行并清空 UserHolder，由第二层 LoginCertificationInterceptor 拦截非白名单
+        boolean result = refreshInterceptor.preHandle(request, response, new Object());
+        assertTrue(result);
+        assertNull(UserHolder.getUser());
     }
 
     @Test
-    void testPreHandleThrowsExceptionOnMalformedToken() {
+    void testPreHandlePassesSilentlyOnMalformedToken() throws Exception {
         when(request.getHeader("Authorization")).thenReturn("not.a.valid.jwt.token");
 
-        AuthorizeException ex = assertThrows(AuthorizeException.class, () ->
-                refreshInterceptor.preHandle(request, response, new Object())
-        );
-        assertEquals("登录凭据无效", ex.getMessage());
+        boolean result = refreshInterceptor.preHandle(request, response, new Object());
+        assertTrue(result);
+        assertNull(UserHolder.getUser());
     }
 
     @Test

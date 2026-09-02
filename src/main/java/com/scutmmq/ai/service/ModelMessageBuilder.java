@@ -40,12 +40,16 @@ public class ModelMessageBuilder {
                                                               String reasoningContent) {
         Map<String, Object> message = new LinkedHashMap<>();
         message.put("role", "assistant");
-        message.put("content", content == null ? "" : content);
-        if (reasoningContent != null && !reasoningContent.isEmpty()) {
+        String cleanContent = com.scutmmq.ai.util.DsmlSanitizer.strip(content);
+        message.put("content", (cleanContent == null || cleanContent.isBlank()) ? null : cleanContent);
+        if (reasoningContent != null && !reasoningContent.isBlank()) {
             message.put("reasoning_content", reasoningContent);
         }
         List<Map<String, Object>> openAiToolCalls = new ArrayList<>();
         for (AgentToolCall call : toolCalls) {
+            if (call.getId() == null || call.getId().isBlank()) {
+                call.setId("call_" + System.nanoTime());
+            }
             Map<String, Object> function = new LinkedHashMap<>();
             function.put("name", call.getName());
             function.put("arguments", argumentsAsString(call.getArguments()));
@@ -66,8 +70,7 @@ public class ModelMessageBuilder {
     public Map<String, Object> buildToolResponseMessage(String toolCallId, String toolName, String content) {
         Map<String, Object> message = new LinkedHashMap<>();
         message.put("role", "tool");
-        message.put("tool_call_id", toolCallId);
-        message.put("name", toolName);
+        message.put("tool_call_id", (toolCallId == null || toolCallId.isBlank()) ? "call_" + System.currentTimeMillis() : toolCallId);
         message.put("content", content == null ? "" : content);
         return message;
     }
@@ -78,8 +81,32 @@ public class ModelMessageBuilder {
      */
     public String argumentsAsString(JsonNode arguments) {
         try {
-            return objectMapper.writeValueAsString(
-                    arguments == null ? objectMapper.createObjectNode() : arguments);
+            if (arguments == null || arguments.isNull() || arguments.isMissingNode()) {
+                return "{}";
+            }
+            if (arguments.isObject() && arguments.has(ToolCallAccumulator.STREAMING_FIELD)) {
+                String raw = arguments.get(ToolCallAccumulator.STREAMING_FIELD).asText("");
+                if (raw == null || raw.isBlank() || raw.equals("{}") || raw.equals("null")) {
+                    return "{}";
+                }
+                try {
+                    JsonNode parsed = objectMapper.readTree(raw);
+                    if (parsed != null && !parsed.isNull()) {
+                        return objectMapper.writeValueAsString(parsed);
+                    }
+                } catch (Exception ignored) {}
+                return "{}";
+            }
+            if (arguments.isTextual()) {
+                String t = arguments.asText();
+                if (t == null || t.isBlank() || t.equals("null") || t.equals("{}")) return "{}";
+                return t;
+            }
+            String s = objectMapper.writeValueAsString(arguments);
+            if (s == null || s.isBlank() || s.equals("null")) {
+                return "{}";
+            }
+            return s;
         } catch (Exception e) {
             return "{}";
         }

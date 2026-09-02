@@ -94,6 +94,13 @@ public class AgentOrchestrator {
     }
 
     /**
+     * 同步运行一次完整对话（不指定商家 ID，默认使用全平台通用知识库）。
+     */
+    public AgentResult run(UserDTO currentUser, List<HistoryMessage> history, String userMessage) {
+        return run(currentUser, history, userMessage, null);
+    }
+
+    /**
      * 同步运行一次完整对话。
      *
      * @param currentUser       当前商城登录用户

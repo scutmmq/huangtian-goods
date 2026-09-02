@@ -1,0 +1,12 @@
+# B4 RAG 回归测试 2: 运费险与退货运费承担
+name: regression-rag-faq-shipping-fee
+message: "退货的运费是由谁承担？运费险怎么理赔？"
+expectReplyNoDsml: true
+expectKeywords:
+  - "运费"
+  - "承担"
+  - "商家"
+  - "买家"
+  - "运费险"
+expectMaxToolExecutions: 2
+userId: 1

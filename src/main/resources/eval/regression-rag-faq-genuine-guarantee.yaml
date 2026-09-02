@@ -1,0 +1,12 @@
+# B4 RAG 回归测试 5: 正品保障与假一赔十政策
+name: regression-rag-faq-genuine-guarantee
+message: "你们商城卖的是正品吗？如果买到假货怎么办？"
+expectReplyNoDsml: true
+expectKeywords:
+  - "正品"
+  - "假一赔十"
+  - "保障"
+  - "赔付"
+  - "官方"
+expectMaxToolExecutions: 2
+userId: 1

@@ -94,11 +94,12 @@ public class RefreshInterceptor implements HandlerInterceptor {
             return true;
 
         } catch (ExpiredJwtException e) {
-            log.warn("令牌已过期:{}", e.getMessage());
-            throw new AuthorizeException("登录已过期，请重新登录");
+            log.debug("令牌已过期:{}", e.getMessage());
+            // 放行给后续拦截器（如 LoginCertificationInterceptor）或白名单接口处理
+            return true;
         } catch (Exception e) {
-            log.error("令牌无效:{}", e.getMessage());
-            throw new AuthorizeException("登录凭据无效");
+            log.debug("令牌无效或解析失败:{}", e.getMessage());
+            return true;
         }
     }
 

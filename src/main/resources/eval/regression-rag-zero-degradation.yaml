@@ -1,0 +1,13 @@
+# B4 RAG 回归测试 10: 基础日常寒暄零退化
+name: regression-rag-zero-degradation
+message: "你好，请问你是谁？你能帮我做什么？"
+expectReplyNoDsml: true
+expectNoTools: true
+expectKeywords:
+  - "你好"
+  - "荒天享物"
+  - "购物助手"
+  - "搜索"
+  - "推荐"
+expectMaxToolExecutions: 2
+userId: 1

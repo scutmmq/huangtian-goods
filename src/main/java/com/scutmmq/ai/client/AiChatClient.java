@@ -153,7 +153,7 @@ public class AiChatClient {
         }
 
         String requestBody = buildStreamRequestBody(messages, tools);
-        log.debug("[AI][HTTP][STREAM] requestBody (len={}): {}", requestBody.length(), requestBody);
+        log.info("[AI][HTTP][STREAM] requestBody: {}", requestBody);
 
         long t0 = System.currentTimeMillis();
         int[] chunkCount = {0};
@@ -173,8 +173,8 @@ public class AiChatClient {
                             status -> status.is4xxClientError() || status.is5xxServerError(),
                             response -> response.bodyToMono(String.class)
                                     .map(errorBody -> {
-                                        log.error("[AI][HTTP][STREAM] provider error status={} body={}",
-                                                response.statusCode(), errorBody);
+                                        log.error("[AI][HTTP][STREAM] provider error status={} body={} requestBody={}",
+                                                response.statusCode(), errorBody, requestBody);
                                         return new RuntimeException(
                                                 "AI Provider error: " + response.statusCode() + " - " + errorBody);
                                     })

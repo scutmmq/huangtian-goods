@@ -68,12 +68,12 @@ public class ToolCallAccumulator {
      * </ul>
      */
     public JsonNode parseFirstChunk(String raw) {
-        if (raw == null || raw.isEmpty()) {
+        if (raw == null || raw.isEmpty() || raw.equals("{}") || raw.equals("null")) {
             return objectMapper.createObjectNode();
         }
         try {
             JsonNode n = objectMapper.readTree(raw);
-            if (n != null) {
+            if (n != null && !n.isNull()) {
                 return n;
             }
         } catch (Exception ignored) {

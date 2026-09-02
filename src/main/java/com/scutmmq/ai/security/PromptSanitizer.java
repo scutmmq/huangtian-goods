@@ -6,19 +6,20 @@ import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.UUID;
 import java.util.regex.Pattern;
 
 /**
  * 注入防御 3 层(L2 输入清洗)。Strategy §7A.2 / §8.1。
  *
- *  1. 黑名单(L1):命中任一 deny 模式直接抛异常,防止提示词覆盖类攻击。
+ *  1. 黑名单(L1):命中任一 deny 模式直接抛异常,防止中英文提示词覆盖类攻击。
  *  2. 白名单(L2):对于类目名 / 商家名,只允许 中文 / 英文 / 数字 / 少量中英文标点;
  *     不匹配返回 "[FILTERED]" 占位,让上层调用方识别并提示用户。
  *  3. JSON 转义(L3):把控制字符、引号、反斜杠转成 JSON 安全形式,
  *     防止换行注入或引号闭合破坏 prompt 拼接。
  *
- * 用 inline escapeJson 而非 commons-text:依赖面最小,
- * 仅需覆盖 §8.1 测试场景(双引号 / 反斜杠 / 控制字符)。
+ * <p>B4 强化：补齐中文间接注入模式库，并提供带动态 Nonce 的知识隔离包装器，
+ * 防止外部商家/商品内容通过伪造闭合标签实施 Prompt 逃逸。</p>
  */
 @Component
 public class PromptSanitizer {
@@ -27,17 +28,24 @@ public class PromptSanitizer {
 
     private static final List<Pattern> DENY_LIST = List.of(
             // DSML / 特殊控制标签:匹配 <|...> 以及全宽竖线 <｜...>(U+FF5C)。
-            // 用 .*? 非贪婪 → 找到首个 > 即可命中。
             Pattern.compile("<[|｜].*?>"),
-            Pattern.compile("(?i)ignore\\s+(previous|all|above)"),
-            Pattern.compile("(?i)system\\s*:\\s*"),
-            Pattern.compile("(?i)assistant\\s*:\\s*"),
+            // 英文指令覆盖
+            Pattern.compile("(?i)ignore\\s+(previous|all|above|instructions)"),
+            Pattern.compile("(?i)system\\s*[:：]\\s*"),
+            Pattern.compile("(?i)assistant\\s*[:：]\\s*"),
             Pattern.compile("(?i)you\\s+are\\s+now"),
-            Pattern.compile("(?i)disregard\\s+(all|previous)")
+            Pattern.compile("(?i)disregard\\s+(all|previous|instructions)"),
+            // 中文指令覆盖与角色扮演提权
+            Pattern.compile("(?i)(忽略|无视|不要理会|取消|覆盖)\\s*(前面|以上|之前|上述|所有|全部).{0,8}(指令|规则|提示|要求|设定|系统)"),
+            Pattern.compile("(?i)(你现在是|从现在开始你扮演|你必须充当|切换到)\\s*(系统|管理员|root|admin|开发者模式)"),
+            Pattern.compile("(?i)(系统|助手|管理员|客服)\\s*[:：]\\s*"),
+            Pattern.compile("(?i)(输出|打印|显示|复述|透露)\\s*(系统提示词|系统指令|system\\s*prompt)")
     );
 
     private static final Pattern SAFE_NAME = Pattern.compile(
             "^[一-龥a-zA-Z0-9\\s\\-_()&（）【】]{1,32}$");
+
+    private static final Pattern UNTRUSTED_TAG_PATTERN = Pattern.compile("(?i)</?UNTRUSTED_KNOWLEDGE[^>]*>");
 
     /** B3 step10: 黑名单命中计数器由 {@link UserMemoryMetrics} 集中管理。 */
     private final UserMemoryMetrics metrics;
@@ -67,8 +75,6 @@ public class PromptSanitizer {
         for (Pattern p : DENY_LIST) {
             if (p.matcher(raw).find()) {
                 metrics.recordPromptInjectionDrop();
-                // B3 fix(Bug 1):命中即写审计行,userId 取 MDC(MallUserContextExecutor 已写入),
-                // 缺 / 解析失败 → null(对应 audit 行 user_id NULL,spec §7A.4 允许)。
                 Long userId = parseLongOrNull(MDC.get("userId"));
                 try {
                     auditService.logPromptInjectionDrop(userId, raw);
@@ -86,6 +92,25 @@ public class PromptSanitizer {
         return escapeJson(raw);
     }
 
+    /**
+     * 将外部未受信任的知识内容包装进带有动态随机 Nonce 的隔离标签中，
+     * 并强制剔除内容中的一切伪造闭合标签，杜绝标签闭合越狱。
+     *
+     * @param rawContent 原始知识切片文本
+     * @return 经过 Nonce 隔离与标签转义的安全包装字符串
+     */
+    public String wrapUntrustedKnowledge(String rawContent) {
+        if (rawContent == null || rawContent.trim().isEmpty()) {
+            return "";
+        }
+        String nonce = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        // 强制剔除正文中可能包含的闭合标签字面量与尖括号伪造
+        String safeContent = UNTRUSTED_TAG_PATTERN.matcher(rawContent).replaceAll("");
+        return "<UNTRUSTED_KNOWLEDGE id=\"" + nonce + "\">\n"
+                + safeContent.trim() + "\n"
+                + "</UNTRUSTED_KNOWLEDGE id=\"" + nonce + "\">";
+    }
+
     private static Long parseLongOrNull(String s) {
         if (s == null || s.isEmpty()) return null;
         try {
@@ -97,8 +122,6 @@ public class PromptSanitizer {
 
     /**
      * Inline JSON 转义:覆盖 " \\ \n \r \t \b \f 以及其他 < 0x20 控制字符。
-     * 与 {@code org.apache.commons.text.StringEscapeUtils.escapeJson} 在本任务
-     * 8 个测试覆盖的输入集上行为一致;不引入 commons-text 依赖。
      */
     private static String escapeJson(String s) {
         StringBuilder sb = new StringBuilder(s.length() + 8);

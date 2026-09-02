@@ -61,7 +61,7 @@ public class DraftCreateOrderTool implements MallAgentTool {
                 .build();
         return AgentToolDefinition.builder()
                 .name(NAME)
-                .description("当用户明确想购买商品时使用。本工具只生成订单确认草稿，不会真的下单。用户在确认卡片上点击“确认下单”后才会触发后端真正下单。")
+                .description("生成「确认下单」草稿卡片。当用户想购买商品、下单或确认收货地址准备购买时，必须调用本工具。只有调用本工具前端才会弹出「确认下单」卡片与按钮供用户点击。严禁仅在回复文本中假装生成草稿！")
                 .parameters(parameters)
                 .build();
     }

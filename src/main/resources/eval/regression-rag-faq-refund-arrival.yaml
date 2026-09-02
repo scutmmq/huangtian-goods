@@ -1,0 +1,13 @@
+# B4 RAG 回归测试 6: 退款到账时效
+name: regression-rag-faq-refund-arrival
+message: "申请退款成功后，退款多久能退回到微信或银行卡？"
+expectReplyNoDsml: true
+expectKeywords:
+  - "微信"
+  - "银行卡"
+  - "工作日"
+  - "到账"
+  - "原路"
+  - "小时"
+expectMaxToolExecutions: 2
+userId: 1

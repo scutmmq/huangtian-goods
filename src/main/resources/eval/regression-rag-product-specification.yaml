@@ -1,0 +1,13 @@
+# B4 RAG 回归测试 7: 商品规格查询
+name: regression-rag-product-specification
+message: "我想了解一下山地自行车的具体配置参数，比如变速器和车架材质。"
+expectReplyNoDsml: true
+expectKeywords:
+  - "自行车"
+  - "变速"
+  - "车架"
+  - "铝合金"
+  - "山地"
+  - "刹车"
+expectMaxToolExecutions: 2
+userId: 1

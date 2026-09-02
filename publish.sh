@@ -1,0 +1,1 @@
+scp ./target/huangtian-goods-release.tar.gz root@119.23.76.234:/root/DockerFile/online-mall/back

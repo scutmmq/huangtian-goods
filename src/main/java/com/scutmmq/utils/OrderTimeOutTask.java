@@ -75,6 +75,18 @@ public class OrderTimeOutTask {
 
     @PostConstruct
     void init(){
+        try {
+            // 确保 Stream 与消费者组存在 (MKSTREAM)
+            redisTemplate.opsForStream().createGroup(
+                    RedisConstants.ORDER_TIMEOUT_STREAM,
+                    ReadOffset.latest(),
+                    RedisConstants.ORDER_TIMEOUT_GROUP
+            );
+            log.info("Redis Stream 消费者组 {} 初始化创建成功", RedisConstants.ORDER_TIMEOUT_GROUP);
+        } catch (Exception e) {
+            log.debug("Redis Stream 消费者组已存在或初始化跳过: {}", e.getMessage());
+        }
+
         getTimeOutOrderExecutor.scheduleAtFixedRate(
                 new GetTimeOutOrderHandler(),
                 0,
@@ -202,6 +214,12 @@ public class OrderTimeOutTask {
                     }
                     log.error("消费超时订单Stream时发生异常，尝试处理Pending列表: {}", e.getMessage());
                     handlePendingList();
+                    try {
+                        Thread.sleep(2000); // 异常休眠 2 秒，防止死循环打满 CPU 与 Redis 连接池
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
                 }
             }
         }

@@ -1,0 +1,12 @@
+# B4 RAG 回归测试 1: 7天无理由退货政策
+name: regression-rag-faq-return-policy
+message: "请问商城支持7天无理由退货吗？具体的退货条件是什么？"
+expectReplyNoDsml: true
+expectKeywords:
+  - "7天"
+  - "7 天"
+  - "退货"
+  - "无理由"
+  - "签收"
+expectMaxToolExecutions: 2
+userId: 1
