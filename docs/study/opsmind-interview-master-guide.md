@@ -2,7 +2,8 @@
 
 > **项目定位**：企业级私有化 AI 运维数字员工系统（基于 Go 1.23 / Gin / PostgreSQL 18 + pgvector / Next.js 14）  
 > **核心定位**：自建 7 步高阶混合 RAG 引擎 + ITIL 故障申告全流程状态机 + 无锁配置热重载 + 双人审核合规流水线  
-> **适用场景**：字节跳动、腾讯、阿里巴巴、美团、华为、快手等大厂 Go 后端、AI 工程化、大模型落地、系统架构面试
+> **适用场景**：字节跳动、腾讯、阿里巴巴、美团、华为、快手等大厂 Go 后端、AI 工程化、大模型落地、系统架构面试  
+> 💡 **代码直达**：点击各章节中的源码超链接，即可在 IDE 中直接跳转至对应的 Go 核心源文件进行 Review！
 
 ---
 
@@ -28,6 +29,10 @@
 ## 一、 项目整体架构与核心业务定位（3 分钟黄金项目介绍）
 
 ### Q1：请用 2~3 分钟介绍一下你的“AI 运维数字员工系统 (OpsMind)”？
+* **【核心源码直达】**：
+  - 核心启动入口：[`server/cmd/main.go`](file:///Users/momingqin/study/school_work/OpsMind/server/cmd/main.go)
+  - 路由与中间件链：[`server/internal/router/router.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/router/router.go)
+  - 架构设计文档：[`docs/TECH.md`](file:///Users/momingqin/study/school_work/OpsMind/docs/TECH.md)
 * **【满分回答话术】**：
   > “面试官您好，**OpsMind** 是我针对企业内部运维知识孤岛、传统故障申告流转慢、以及公有云大模型存在数据安全合规隐患等痛点，**自主设计并研发的企业级私有化 AI 运维数字员工与 ITIL 工单管理系统**。
   > 
@@ -44,6 +49,9 @@
 ## 二、 为什么选用 Go 语言自研后端？Go 并发与架构优势是什么？
 
 ### Q2：在荒天商城用了 Java 后，为什么 OpsMind 这个项目选择用 Go 语言？Go 相比 Java 有什么独特优势？
+* **【核心源码直达】**：
+  - 线程安全无锁操作：[`server/internal/service/llm_config_service.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/service/llm_config_service.go)
+  - 异步协程池：[`server/internal/rag/processor.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/processor.go)
 * **【满分回答话术】**：
   > “选择 Go 语言主要基于系统定位与架构特性的深度考量：
   > 1. **高并发 I/O 密集型场景与极低内存占用**：AI 数字员工系统涉及大量的并发 SSE 流式长连接、大模型 HTTP 调用、向量检索以及并发文档切片。Go 原生轻量级的 **Goroutine（初始栈仅 2KB，远低于 Java 默认 1MB 线程栈）** 和 **GMP 调度模型**，单机即可轻松支撑数万并发长连接，而内存占用仅为 JVM 的几分之一，非常适合轻量化私有化部署；
@@ -56,9 +64,12 @@
 ## 三、 为什么不用 LangChain/LlamaIndex，而是自主研发 7 步 RAG 管道？
 
 ### Q3：市面上有成熟的 LangChain 或 LlamaIndex，为什么你要在 Go 里面手写 RAG 引擎？
+* **【核心源码直达】**：
+  - 核心管道编排：[`server/internal/rag/pipeline.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/pipeline.go)
+  - 领域类型定义：[`server/internal/rag/types.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/types.go)
 * **【满分回答话术】**：
   > “主要基于三个工业级工程考量：
-  > 1. **拒绝‘黑盒黑魔法’，追求全链路精细化可观测与控制**：开源框架封装过重，当出现召回不准、慢查询或特定步骤超时时极难调优。自建 RAG 管道（`server/internal/rag/pipeline.go`）让我们能够对 7 个步骤中的每一个（如分词、权重、RRF 常数 $k$、重排阈值）进行**独立开关、超时熔断与单独的降级监控**；
+  > 1. **拒绝‘黑盒黑魔法’，追求全链路精细化可观测与控制**：开源框架封装过重，当出现召回不准、慢查询或特定步骤超时时极难调优。自建 RAG 管道（[`pipeline.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/pipeline.go)）让我们能够对 7 个步骤中的每一个（如分词、权重、RRF 常数 $k$、重排阈值）进行**独立开关、超时熔断与单独的降级监控**；
   > 2. **极致性能与无冗余依赖**：Python 生态框架吞吐低、并发性能弱。用 Go 自建让整个检索链路耗时压降至毫秒级，且无需引入额外的 Python 微服务中间件；
   > 3. **与业务数据库深度融合**：自建 RAG 允许我们将 PostgreSQL 关系型业务数据与 `pgvector` 向量数据做**单机原子事务级查询与联合过滤（Hybrid Query with Metadata Filtering）**，避免了数据跨异构存储同步的一致性难题。”
 
@@ -67,6 +78,13 @@
 ## 四、 7 步高阶 RAG 引擎全链路执行流程与模块拆解
 
 ### Q4：详细讲讲 OpsMind 的 7 步 RAG 管道是如何一步步执行的？
+* **【核心源码直达】**：
+  - 管道总编排：[`server/internal/rag/pipeline.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/pipeline.go)
+  - Step 1 查询改写：[`server/internal/rag/query_rewrite.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/query_rewrite.go)
+  - Step 2 多路路由：[`server/internal/rag/multi_route.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/multi_route.go)
+  - Step 3 双路混合检索：[`server/internal/rag/retriever.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/retriever.go) 与 [`bm25.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/bm25.go)
+  - Step 4 RRF 融合：[`server/internal/rag/hybrid.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/hybrid.go)
+  - Step 5 重排序：[`server/internal/rag/rerank.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/rerank.go)
 
 ```
                          OpsMind 7 步 RAG 管道全链路
@@ -94,6 +112,9 @@
 ## 五、 混合检索与 RRF (倒数排名融合) 算法的底层原理与公式
 
 ### Q5：为什么单靠语义向量检索不够？RRF 算法是如何解决混合检索打分不一致问题的？
+* **【核心源码直达】**：
+  - RRF 算法实现：[`server/internal/rag/hybrid.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/hybrid.go)
+  - BM25 中文分词检索：[`server/internal/rag/bm25.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/bm25.go)
 * **【满分回答话术】**：
   > “**为什么单靠向量检索不够？**
   > 向量模型（如 BERT/Qwen-Embedding）擅长捕捉**宽泛语义相似度**，但在运维领域面对具体的**‘专有名词、错误码、Linux 命令参数’（如 `OOM-kill 137`、`iptables -F`、`TK-20260901`）**时，极易发生‘语义漂移’，甚至将完全不相干但语义结构相似的文档检索出来。
@@ -113,6 +134,9 @@
 ## 六、 PostgreSQL 18 + pgvector 向量存储架构选型与 HNSW 索引调优
 
 ### Q6：为什么选择 pgvector 而不是专用的向量数据库（如 Milvus / Pinecone）？HNSW 索引有什么优势？
+* **【核心源码直达】**：
+  - 向量存储与余弦距离查询：[`server/internal/adapter/vector_store.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/adapter/vector_store.go)
+  - 数据库迁移与索引创建：[`server/internal/database/migrate.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/database/migrate.go)
 * **【满分回答话术】**：
   > “**为什么选择 pgvector？**
   > 1. **单库闭环，消除分布式数据孤岛**：运维系统中知识库文章的元数据（标题、分类、权限、创建人、审核状态）属于关系型数据，若用独立向量库，增删改查需要跨网络两阶段同步，极易产生一致性裂痕；而 PostgreSQL + pgvector 可以在**单次 SQL 中通过 `WHERE` 关系型过滤 + `<=>` 向量距离排序**，原子级高效完成！
@@ -129,6 +153,9 @@
 ## 七、 为什么需要 Cross-Encoder Rerank (重排序)？如何部署与调用？
 
 ### Q7：前面已经有了 RRF 融合，为什么最后还要加一步 Cross-Encoder Rerank？
+* **【核心源码直达】**：
+  - 重排序管道逻辑：[`server/internal/rag/rerank.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/rerank.go)
+  - 重排序适配器：[`server/internal/adapter/rerank_client.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/adapter/rerank_client.go)
 * **【满分回答话术】**：
   > “这是现代高阶 RAG 的**‘漏斗架构（粗排 $\rightarrow$ 精排）’**思想：
   > 1. **Bi-Encoder（第一阶段粗排）**：无论是向量还是 BM25，都是把 Query 和 Document 分别独立编码（Dual-Encoder），计算速度极快（毫秒级从百万片段中捞出 Top-20），但**缺乏 Query 和 Document 词与词之间的深度交叉注意力机制**；
@@ -140,6 +167,9 @@
 ## 八、 置信度评估与三级动态分流策略（从智能问答到工单流转）
 
 ### Q8：如何实现 AI 从“聊天答疑”向“业务运维工单”的无缝流转？
+* **【核心源码直达】**：
+  - SSE 对话流式分流：[`server/internal/handler/chat.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/handler/chat.go)
+  - 对话业务服务：[`server/internal/service/chat_service.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/service/chat_service.go)
 * **【满分回答话术】**：
   > “在企业运维中，最忌讳的是 AI 在遇到未知疑难杂症时‘胡说八道（幻觉）’误导一线运维。我们设计了**置信度三级判定与动态分流机制**：
   > 1. **置信度计算**：结合 Rerank 模型的交叉注意力得分与向量余弦相似度，计算出当前召回上下文与用户提问的综合置信度匹配分 $Score \in [0, 1]$；
@@ -153,6 +183,10 @@
 ## 九、 ITIL 故障申告工单状态机与 CAS 乐观锁防并发抢单
 
 ### Q9：工单流转的状态机是如何设计的？在高并发下多位运维同时点击“接单”时，如何防止并发冲突？
+* **【核心源码直达】**：
+  - 工单服务与 CAS 抢单：[`server/internal/service/ticket_service.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/service/ticket_service.go)
+  - 工单数据模型：[`server/internal/model/ticket.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/model/ticket.go)
+  - 工单接口处理：[`server/internal/handler/ticket.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/handler/ticket.go)
 * **【满分回答话术】**：
   > “**工单状态机设计**：
   > 严格遵循 ITIL 事件管理规范，定义了 5 大状态：
@@ -177,6 +211,9 @@
 ## 十、 基于 Go `sync/atomic.Value` 的大模型配置与 Prompt 零停机无锁热重载
 
 ### Q10：管理员在后台修改了大模型 API Key、模型名称或 Prompt 模板，系统是如何在不重启的情况下实现毫秒级生效且无锁高性能读取的？
+* **【核心源码直达】**：
+  - `atomic.Value` 热重载实现：[`server/internal/service/llm_config_service.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/service/llm_config_service.go)
+  - 配置数据模型：[`server/internal/model/llm_config.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/model/llm_config.go)
 * **【满分回答话术】**：
   > “在后端架构中，高频的 RAG 问答请求每秒都需要读取当前生效的 LLM 模型配置与 Prompt 模板。如果使用传统的 `sync.RWMutex` 读写锁，在高并发读时依然存在锁竞争和 CPU 缓存失效开销。
   > 
@@ -190,6 +227,10 @@
 ## 十一、 知识库双人审核发布流水线与向量“先写后删”原子替换机制
 
 ### Q11：知识库文章发布时，如果一个 50MB 的大文档分块向量化需要几分钟，如何保证线上检索不中断且不读到脏数据？
+* **【核心源码直达】**：
+  - 知识库发布服务：[`server/internal/service/knowledge_service.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/service/knowledge_service.go)
+  - 异步分块处理器：[`server/internal/rag/processor.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/processor.go)
+  - 递归文本分块器：[`server/internal/rag/chunker.go`](file:///Users/momingqin/study/school_work/OpsMind/server/internal/rag/chunker.go)
 * **【满分回答话术】**：
   > “我们设计了**‘异步流水线 + 双人审核 + 先写后删原子切换’**的发布架构：
   > 1. **双人审核合规安全**：运维编辑提交文章后进入 `Reviewing` 状态，必须由权限不同的另一位主管审批通过（`审核人 ID != 创建人 ID`）才能进入发布，杜绝恶意投毒；
