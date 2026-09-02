@@ -14,9 +14,13 @@
 * [四、 四种原生拒绝策略与生产选择](#四-四种原生拒绝策略与生产选择)
 * [五、 为什么《阿里巴巴 Java 开发手册》强制禁止使用 Executors？](#五-为什么阿里巴巴-java-开发手册强制禁止使用-executors)
 * [六、 深度拆解本项目 Commit `1524f78` 真实重构实战](#六-深度拆解本项目-commit-1524f78-真实重构实战)
-  * [6.1 重构前老代码的 4 大隐患与雷区](#61-重构前老代码的-4-大隐患与雷区)
-  * [6.2 重构后生产级落地的 4 大设计精髓](#62-重构后生产级落地的-4-大设计精髓)
-  * [6.3 线程池业务物理隔离架构（AiTaskExecutorConfig）](#63-线程池业务物理隔离架构aitaskexecutorconfig)
+* [七、 Java 三大并发控制手段深度对比：synchronized vs ReentrantLock vs 原子类 CAS (含银行高并发编程真题实战)](#七-java-三大并发控制手段深度对比synchronized-vs-reentrantlock-vs-原子类-cas-含银行高并发编程真题实战)
+* [八、 Java 创建多线程的 4 种方式与底层本质](#八-java-创建多线程的-4-种方式与底层本质)
+* [九、 并发三大特性（原子性、可见性、有序性）与各大工具保障全景表](#九-并发三大特性原子性可见性有序性与各大工具保障全景表)
+* [十、 Java 内存模型 (JMM) 与 8 大 Happens-Before 规则](#十-java-内存模型-jmm-与-8-大-happens-before-规则)
+* [十一、 JUC 核心并发工具“四剑客”通俗实战与比喻 (CountDownLatch / CyclicBarrier / Semaphore / CompletableFuture)](#十一-juc-核心并发工具四剑客通俗实战与比喻)
+* [十二、 ThreadLocal 底层原理、内存泄漏与强弱引用深度剖析](#十二-threadlocal-底层原理内存泄漏与强弱引用深度剖析)
+* [十三、 死锁（Deadlock）的产生条件、排查诊断与破局策略](#十三-死锁deadlock的产生条件排查诊断与破局策略)
 
 ---
 
@@ -438,3 +442,212 @@ public class BankAccount {
    - *问题描述*：当有上万并发线程同时执行 `deposit` 时，大量线程 CAS 失败并无限 `while(true)` 自旋，会导致 CPU 使用率飙高。
    - *解决方案*：如果是纯高并发累加/统计场景，可以使用 JDK 8 的 **`LongAdder`**！
    - *`LongAdder` 底层原理*：**分段累加（空间换时间 / Cell 数组）**。当单 Key CAS 发生激烈冲突时，自动将线程哈希分散到不同的 `Cell` 桶中独立累加，最终 `sum()` 时汇总所有 Cell 的值，吞吐量比 `AtomicLong` 高出近一个数量级！
+
+---
+
+## 八、 Java 创建多线程的 4 种方式与底层本质
+
+### 8.1 四种创建方式横向对比
+
+| 方式 | 核心实现 | 是否有返回值 | 是否能抛出异常 | 适用场景 |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. 继承 `Thread` 类** | 重写 `run()` 方法 | ❌ 无返回值 (`void`) | ❌ 不能声明受检异常 | 简单教学 Demo，Java 单继承限制，不推荐生产使用 |
+| **2. 实现 `Runnable` 接口** | 重写 `run()` 方法 | ❌ 无返回值 (`void`) | ❌ 不能声明受检异常 | 解耦任务与线程，适合普通异步无返回任务 |
+| **3. 实现 `Callable` + `FutureTask`** | 重写 `call()` 方法 | ✅ **有泛型返回值 (`V`)** | ✅ **能抛出受检异常** | 适合需要获取子线程计算结果的场景 |
+| **4. 线程池 `ThreadPoolExecutor`** | 提交 `Runnable` 或 `Callable` | 根据提交方法决定 (`submit` 有 / `execute` 无) | 支持 | **企业生产环境唯一推荐方式**（资源池化复用） |
+
+```java
+// 1. 实现 Callable + FutureTask 获取返回值示例：
+Callable<String> task = () -> {
+    Thread.sleep(1000);
+    return "Task Completed!";
+};
+FutureTask<String> futureTask = new FutureTask<>(task);
+new Thread(futureTask).start();
+String result = futureTask.get(); // 阻塞等待子线程执行完毕并返回结果
+
+// 2. 现代 Java 8+ CompletableFuture 异步编排（最优雅）：
+CompletableFuture.supplyAsync(() -> "Query DB")
+    .thenApply(res -> res + " -> Process Data")
+    .thenAccept(System.out::println);
+```
+
+### 8.2 🔥 面试深度考点：Java 本质上有几种创建线程的方式？
+* **标准满分答案**：
+  > “从面向对象 API 层面看有 4 种（Thread、Runnable、Callable、线程池）；  
+  > 但**从底层操作系统和 JVM 本质来看，只有 1 种方式——那就是 `new Thread().start()` 触发 OS 底层的系统调用（如 Linux 的 `clone()`）创建内核线程**！  
+  > 所谓的 `Runnable` 和 `Callable` 只是定义了‘要执行的任务内容（Task）’，它们自身根本没有创建线程的能力，最终都必须包装进 `Thread` 实例调用 `start()` 才能真正启动线程。”
+
+### 8.3 `start()` vs `run()` 的底层区别
+* **`thread.run()`**：只是当前主线程上的一个**普通方法调用**，代码依然在主线程同步顺序执行，**根本没有启动新线程**！
+* **`thread.start()`**：通知 JVM 和操作系统分配线程栈并创建新线程，使线程进入 **`READY` 就绪态**，等待 CPU 调度器分配时间片后在独立的线程上下文里异步执行 `run()`。
+
+---
+
+## 九、 并发三大特性（原子性、可见性、有序性）与各大工具保障全景表
+
+在多线程并发编程中，所有的 Bug 本质上都逃不出**并发三大特性**的范畴：
+
+```
+                              并发三大核心特性
+┌───────────────────────────────────────────────────────────────────────────┐
+│ 1. 原子性 (Atomicity)    : 一组操作要么全部执行完毕，要么全部不执行，中途不被打断 │
+│ 2. 可见性 (Visibility)   : 一个线程修改了共享变量，其他线程能够立即看到最新值     │
+│ 3. 有序性 (Ordering)     : 程序执行的顺序按照代码先后顺序执行，不被编译器/CPU 乱序│
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+### 🔥 宇宙级全景对照表：各大并发工具保证了什么性质？没保证什么？
+
+| 并发关键字 / 工具 | 是否保证原子性？ | 是否保证可见性？ | 是否保证有序性？ | 核心底层机制与大白话解释 |
+| :--- | :--- | :--- | :--- | :--- |
+| **`volatile`** | ❌ **不保证！**<br>（无法保证 `count++` 复合操作原子性） | ✅ **保证！** | ✅ **保证！** | • **可见性**：修改立即刷回主内存，触发 CPU 总线嗅探使其他核心本地缓存失效；<br>• **有序性**：插入硬件内存屏障禁止指令重排；<br>• **不保证原子性**：`count++` 包含读、改、写三步字节码，多线程并发依然会互相覆盖。 |
+| **`synchronized`** | ✅ **保证！** | ✅ **保证！** | ✅ **保证！** | • JVM 对象监视器锁（`monitorenter/exit`）；<br>• 保证同一时刻只有一个线程进入临界区，出临界区前强制刷盘保证可见性，单线程内保证 `as-if-serial` 语义。 |
+| **`ReentrantLock`** | ✅ **保证！** | ✅ **保证！** | ✅ **保证！** | • 基于 AQS 同步队列与 CAS 状态修改，提供了与 `synchronized` 相同的内存语义与三大特性保障，且支持超时、可中断。 |
+| **原子类 `AtomicLong`** | ✅ **保证！** | ✅ **保证！** | ✅ **保证！** | • 变量使用 `volatile value` 保证可见性与有序性；<br>• 数值更新基于 CPU **`CAS`** 汇编指令保证单变量原子性。 |
+| **`final` 关键字** | ❌ 不涉及并发写 | ✅ **保证！** | ✅ **保证！** | • **初始化安全性**：JMM 保证在构造函数结束前，`final` 变量的写入绝对先发生于将该对象的引用暴露给外部，防止其他线程读到半初始化状态。 |
+| **`ThreadLocal`** | ❌ 不涉及共享 | ❌ 不涉及共享 | ❌ 不涉及共享 | • **线程隔离哲学**：根本不让多个线程共享变量！每个线程内部持有一份独立变量副本，从根源上消除了数据竞争。 |
+
+---
+
+## 十、 Java 内存模型 (JMM) 与 8 大 Happens-Before 规则
+
+### 10.1 为什么会有并发问题？（JMM 抽象架构）
+JMM 规定：所有的变量都存储在**主内存（Main Memory，线程共享）**中；每个线程拥有自己私有的**工作内存（Working Memory，对应 CPU 寄存器、写缓冲区与 L1/L2/L3 缓存）**。
+* 线程不能直接读写主内存中的变量，必须先将主内存的变量**拷贝一份副本到自己的工作内存中**；
+* 如果线程 A 修改了变量副本，但**还没来得及刷回主内存**，线程 B 去主内存读到的依然是旧值 —— 这就是**可见性问题**的硬件根源！
+
+### 10.2 Happens-Before 原则（大白话判断并发是否安全的最高法则）
+如果操作 A `happens-before` 操作 B，那么操作 A 的执行结果对操作 B **必须可见**，且 A 的执行顺序排在 B 之前。
+
+1. **程序次序规则（Program Order Rule）**：在一个线程内部，按照代码书写的顺序，前面的操作先行发生于后面的操作（保证单线程执行结果正确）；
+2. **管程锁定规则（Monitor Lock Rule）**：一个 `unlock`（解锁）操作先行发生于后面对**同一个锁**的 `lock`（加锁）操作；
+3. **`volatile` 变量规则**：对一个 `volatile` 变量的写操作先行发生于后面对这个变量的读操作（写完立刻对读可见）；
+4. **线程启动规则（Thread Start Rule）**：主线程调用 `t1.start()` 操作先行发生于子线程 `t1` 内的任何动作；
+5. **线程终止规则（Thread Join Rule）**：子线程 `t1` 中的所有操作都先行发生于其他线程对 `t1.join()` 的成功返回；
+6. **线程中断规则（Thread Interruption Rule）**：对线程 `interrupt()` 的调用先行发生于被中断线程检测到中断事件的发生（`Thread.interrupted()`）；
+7. **对象终结规则（Finalizer Rule）**：一个对象的构造函数执行结束先行发生于它的 `finalize()` 方法；
+8. **传递性（Transitivity）**：如果操作 $A \prec B$，且操作 $B \prec C$，则操作 $A \prec C$。
+
+---
+
+## 十一、 JUC 核心并发工具“四剑客”通俗实战与比喻
+
+### 1. `CountDownLatch`（倒计时门栓 · 一等多）
+* **【生活比喻】**：**火箭发射倒计时 / 大巴车等人齐发车**。总指挥等待所有 5 个检查项全部就绪（计数归 0），才点火发射。
+* **【核心机制】**：计数器只能使用一次，不能重置。
+* **【核心方法】**：`countDown()`（计数 -1，不阻塞调用方）、`await()`（阻塞等待直到计数变为 0）。
+
+```java
+CountDownLatch latch = new CountDownLatch(3);
+for (int i = 0; i < 3; i++) {
+    new Thread(() -> {
+        System.out.println("子任务完成");
+        latch.countDown(); // 计数器 -1
+    }).start();
+}
+latch.await(); // 主线程阻塞等待，直到 3 个子任务全部 countDown 归零
+System.out.println("所有子任务完成，主线程继续执行！");
+```
+
+---
+
+### 2. `CyclicBarrier`（循环栅栏 · 多等齐 · 可复用）
+* **【生活比喻】**：**游乐园过山车**。必须凑齐 8 个人，栅栏才打开放行大家一起坐车。发车后栅栏重新关上，等待下一批 8 个人凑齐（可循环使用）。
+* **【核心方法】**：`await()`（到达栅栏并挂起等待，直到达到指定人数，所有线程同时被唤醒冲过栅栏）。
+
+---
+
+### 3. `Semaphore`（信号量 · 资源限流）
+* **【生活比喻】**：**停车场停车位**。停车场一共只有 3 个车位，来了 10 辆车。有空位才能进（`acquire()`），出场腾出车位（`release()`），后面的车才能进。常用于**接口限流防被击垮**。
+
+```java
+Semaphore semaphore = new Semaphore(3); // 限制最大并发量为 3
+for (int i = 0; i < 10; i++) {
+    new Thread(() -> {
+        try {
+            semaphore.acquire(); // 获取 1 个通行许可证 (无可用则阻塞)
+            System.out.println(Thread.currentThread().getName() + " 正在访问资源...");
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } finally {
+            semaphore.release(); // 释放许可证，唤醒排队线程
+        }
+    }).start();
+}
+```
+
+---
+
+### 4. `CompletableFuture`（现代异步编排之王）
+* 支持非阻塞回调、多任务组合（`allOf` / `anyOf`）、异常捕获重试，彻底告别传统 `Future.get()` 阻塞等待的弊端。
+
+---
+
+## 十二、 `ThreadLocal` 底层原理、内存泄漏与强弱引用深度剖析
+
+### 12.1 `ThreadLocal` 架构模型
+* 每个 `Thread` 对象内部都有一个专属的成员变量：`ThreadLocal.ThreadLocalMap threadLocals`；
+* `ThreadLocalMap` 是一个定制的哈希散列表，其内部数组元素为 `Entry`：
+  ```java
+  static class Entry extends WeakReference<ThreadLocal<?>> {
+      Object value; // 强引用的业务数据
+      Entry(ThreadLocal<?> k, Object v) {
+          super(k); // Key 是弱引用！
+          value = v;
+      }
+  }
+  ```
+
+### 12.2 🔥 为什么 `ThreadLocal` 会发生内存泄漏？
+1. **Key 的弱引用被回收**：当外部代码将 `threadLocal = null` 后，垃圾回收器 GC 会在下一次运行时**自动回收作为弱引用的 Key**。此时 `ThreadLocalMap` 中出现了 `Key == null` 但 `Value != null` 的僵尸 `Entry`；
+2. **Value 的强引用链依然存活**：由于线程池中的核心线程是**长久存活、反复复用的**，该线程身上的引用链 `Thread -> ThreadLocalMap -> Entry -> Value` 始终强引用可达！
+3. **后果**：Value 占用的堆内存永远无法被 GC 回收，随着不断产生请求，内存被逐步蚕食，最终引发 **`OutOfMemoryError: Java heap space`**！
+
+### 12.3 最佳实践（防御性编程）
+* **铁律**：**使用 `ThreadLocal` 必须配套 `try-finally`，在 `finally` 块中显式调用 `remove()` 清除！**
+
+```java
+public static final ThreadLocal<UserContext> USER_HOLDER = new ThreadLocal<>();
+
+public void handleRequest(HttpRequest request) {
+    try {
+        USER_HOLDER.set(parseUser(request));
+        doBusiness();
+    } finally {
+        USER_HOLDER.remove(); // 必须显式清理，防止线程池复用引发内存泄漏与脏数据！
+    }
+}
+```
+
+---
+
+## 十三、 死锁（Deadlock）的产生条件、排查诊断与破局策略
+
+### 13.1 死锁产生的 4 个必要条件（缺一不可）
+1. **互斥条件**：资源同一时刻只能被一个线程占用（如互斥锁）；
+2. **请求与保持条件**：线程已持有了至少一个资源，同时又提出了新的资源请求，而新资源被其他人占有，此时该线程保持原有资源不放；
+3. **不可剥夺条件**：线程已获得的资源在未使用完之前，不能被其他线程强行抢走；
+4. **循环等待条件**：存在一个线程等待环路：线程 A 等待线程 B 占有的锁，线程 B 等待线程 A 占有的锁（形成闭环）。
+
+### 13.2 线上死锁排查 3 步法（面试必考命令）
+1. **第一步：查看 Java 进程 PID**
+   ```bash
+   jps -l
+   ```
+2. **第二步：打印线程堆栈并定位死锁点（核心命令）**
+   ```bash
+   jstack <PID>
+   ```
+   * 在输出日志的最后，JVM 会自动执行死锁检测，直接输出：
+     ```text
+     Found 1 deadlock.
+     "Thread-1": waiting to lock monitor 0x00007f (object A), which is held by "Thread-2"
+     "Thread-2": waiting to lock monitor 0x000080 (object B), which is held by "Thread-1"
+     ```
+3. **第三步：图形化排查**：使用 JDK 自带的 `jconsole` 或 `jvisualvm` 连接进程，点击“检测死锁”按钮即可定位代码行号。
+
+### 13.3 彻底预防死锁的工程手段
+* **破坏循环等待（最常用）**：**固定加锁顺序（Lock Ordering）**（如银行账户转账按 `accountId` 字典序先后加锁）；
+* **破坏请求与保持**：使用 `ReentrantLock.tryLock(timeout, unit)` 设置获取锁的超时时间，拿不到锁主动释放已持有的资源并重试。
