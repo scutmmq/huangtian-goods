@@ -16,11 +16,11 @@
 * **四、 四种原生拒绝策略与生产选择**
 * **五、 为什么《阿里巴巴 Java 开发手册》强制禁止使用 Executors？**
 * **六、 深度拆解本项目 Commit `1524f78` 真实重构实战**
-* **七、 Java 三大并发控制手段深度对比：synchronized vs ReentrantLock vs 原子类 CAS (含银行高并发编程真题实战)**
+* **七、 并发锁机制终极通关：从小白零基础到 synchronized 锁升级与 AQS 底层 (含银行高并发编程真题实战)**
 * **八、 Java 创建多线程的 4 种方式与底层本质**
 * **九、 并发三大特性（原子性、可见性、有序性）与各大工具保障全景表**
 * **十、 Java 内存模型 (JMM) 与 8 大 Happens-Before 规则**
-* **十一、 JUC 核心并发工具“四剑客”通俗实战与比喻 (CountDownLatch / CyclicBarrier / Semaphore / CompletableFuture)**
+* **十一、 JUC 核心并发工具“四剑客”通俗实战与 CompletableFuture 企业级全家桶**
 * **十二、 ThreadLocal 底层原理、内存泄漏与强弱引用深度剖析**
 * **十三、 死锁（Deadlock）的产生条件、排查诊断与破局策略**
 
@@ -307,21 +307,150 @@ while (!Thread.currentThread().isInterrupted()) {
 
 ---
 
-## 七、 Java 三大并发控制手段深度对比：synchronized vs ReentrantLock vs 原子类 CAS (含银行高并发编程真题实战)
+## 七、 并发锁机制终极通关：从小白零基础到 synchronized 锁升级与 AQS 底层
 
-### 7.1 三大并发控制手段的核心特征与通俗比喻
+### 7.1 为什么要有锁？（用“银行取钱”和“抢火车票”彻底讲懂线程安全与竞态条件）
+
+* **没有锁的恐怖灾难（数据错乱 / 竞态条件 Race Condition）**：
+  假设银行账户里有 **100 元**。张三和妻子李四在同一毫秒分别在两个 ATM 机上取 100 元：
+  1. 线程 A（张三）查询余额：读取到内存中的值是 `100`；
+  2. 线程 B（李四）同时也查询余额：读取到内存中的值也是 `100`；
+  3. 线程 A 扣款 100，写入新余额：`100 - 100 = 0`，吐钞 100 元；
+  4. 线程 B 也扣款 100，写入新余额：`100 - 100 = 0`，也吐钞 100 元！
+  * **结果**：银行卡原本只有 100 元，却被取走了 **200 元**，银行凭空亏损 100 元！
+* **锁的物理本质**：
+  锁就像**更衣室门上的一把机械插销**。谁先抢到插销谁就把门反锁上（获取锁），只有等里面的人穿好衣服推门出来（释放锁），下一个排队的人才能进去。**确保同一时刻，有且仅有一个线程能修改共享内存数据**！
+
+---
+
+### 7.2 小白一次性搞懂并发界“所有锁的名词”（通俗生活比喻全景卡）
+
+面试官经常会抛出一堆高大上的名词，其实它们只是**看待锁的“不同角度”**：
+
+```
+                           Java 并发锁全景分类谱系
+┌────────────────────────────────────────────────────────────────────────┐
+│ 1. 态度乐观还是悲观？  ──► 乐观锁 (CAS/版本号) vs 悲观锁 (synchronized/ReentrantLock)│
+├────────────────────────────────────────────────────────────────────────┤
+│ 2. 排不排队先来后到？  ──► 公平锁 (老实排队) vs 非公平锁 (插队失败再排队)       │
+├────────────────────────────────────────────────────────────────────────┤
+│ 3. 进门后能否进内室？  ──► 可重入锁 (同一线程自动进) vs 不可重入锁 (自己死锁自己)│
+├────────────────────────────────────────────────────────────────────────┤
+│ 4. 能否多人同时看？    ──► 共享锁 (读锁多读) vs 独占/排他锁 (写锁只能一人改)  │
+├────────────────────────────────────────────────────────────────────────┤
+│ 5. 抢不到时原地等吗？  ──► 自旋锁 (while循环原地跺脚) vs 阻塞锁 (休眠剥夺CPU)   │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+1. **乐观锁（Optimistic Lock）vs 悲观锁（Pessimistic Lock）**：
+   - **悲观派（synchronized / ReentrantLock）**：总觉得别人会来改我的数据，防贼一样，**一进来就先把门焊死加锁**，别人想改必须在门外休眠排队。适合**写极其频繁、冲突严重**的场景；
+   - **乐天派（CAS / 数据库 version 版本号）**：觉得世界很美好，不锁门，大家随便读。只有在最后真正提交更新的毫秒瞬间，看一眼版本号变没变：没变就提交成功，变了就再试一次。适合**读多写少、冲突极低**的场景。
+2. **公平锁（Fair）vs 非公平锁（Nonfair）**：
+   - **公平锁**：像食堂排队打饭，严格按照排队先后顺序放行，先到先得。优点是**杜绝饥饿**，缺点是排在前面的线程睡着了需要操作系统唤醒，频繁唤醒导致**吞吐量极差**；
+   - **非公平锁（ReentrantLock 默认就是非公平锁！）**：新来的线程不管三七二十一，**先趁机抢一把试试！** 运气好正好赶上刚释放锁，直接不用排队秒级执行；抢失败了才乖乖去队尾排队。**极大减少了线程挂起与唤醒的上下文开销，吞吐量高数十倍！**
+3. **可重入锁（Reentrant Lock / 递归锁）**：
+   - **生活比喻**：你拿着钥匙打开家大门进了客厅，要去卧室时**不需要再掏出钥匙重新开一次门**！
+   - **反面死锁**：如果是不可重入锁，方法 `A()` 拿着锁，内部调用了方法 `B()`（`B` 也要同一个锁），此时同一个线程在进入 `B` 时会被自己挡在门外，**自己把自己死锁死在里面！**
+   - **Java 中 `synchronized` 和 `ReentrantLock` 都是可重入锁**，底层维护一个计数器：加一次锁 `state + 1`，退出一个代码块 `state - 1`，只有归 0 锁才真正释放。
+4. **共享锁（Shared Lock）vs 独占排他锁（Exclusive Lock）**：
+   - **典型代表**：`ReentrantReadWriteLock`（读写锁）；
+   - **规则**：**读读共享（大家一起看书），读写互斥，写写互斥（有人在黑板上改字时，谁都不能看，谁都不能写）**。
+5. **自旋锁（Spin Lock）**：
+   - 抢不到锁时不立刻去睡觉（不陷入内核态休眠），而是在 CPU 上执行一个快速的空循环 `while(true)` **原地跺脚等几微秒**。如果持有锁的线程很快就放锁了，自旋线程就能立刻拿到锁，省去了上万个 CPU 周期的线程上下文切换代价！
+
+---
+
+### 7.3 `synchronized` 锁升级底层全过程（小白大白话 + 深度图解）
+
+> 💡 **历史痛点**：在早期（JDK 1.5 以前），`synchronized` 是一个人人嫌弃的“慢东西”，因为只要一加锁，就会向操作系统申请重量级互斥量（Mutex），导致大量线程被操作系统粗暴地挂起和唤醒，性能极差，被称为**“重量级锁”**。
+
+为了拯救性能，JDK 1.6 官方引入了**锁升级机制（只能单向升级，不能降级）**：
+根据竞争激烈的程度，锁会经历 4 种状态的蜕变：
+
+$$\mathbf{无锁 \xrightarrow{单线程常驻} 偏向锁 \xrightarrow{双线程轻度交替} 轻量级锁 \xrightarrow{多线程激烈竞争} 重量级锁}$$
+
+```
+                   synchronized 锁升级四部曲
+┌────────────────────────────────────────────────────────┐
+│ 1. 无锁态 (001)                                        │
+│    • 没有多线程竞争，对象自由访问。                    │
+├────────────────────────────────────────────────────────┤
+│ 2. 偏向锁 (101) 【单人独享模式】                       │
+│    • 发现自始至终只有一个线程在跑！                    │
+│    • 把线程 ID 直接写到对象头 Mark Word 门牌号上。     │
+│    • 下次该线程再来，看一眼是自己的名字直接进，零锁开销│
+├────────────────────────────────────────────────────────┤
+│ 3. 轻量级锁 (00) 【两人礼貌交替模式】                  │
+│    • 另一个线程 B 也来访问了，但两人没有同时抢，而是交替运行│
+│    • 撤销偏向锁，升级为轻量级锁。                      │
+│    • 线程通过 CAS 自旋把对象头指针指向自己栈帧的锁记录 │
+│    • 线程不休眠！原地自旋等待，避免内核态切换。        │
+├────────────────────────────────────────────────────────┤
+│ 4. 重量级锁 (10) 【多人恶性疯抢模式】                  │
+│    • 多个线程同时争抢，或者自旋次数超标。              │
+│    • 轻量级锁扛不住了，升级为重量级锁！                │
+│    • 向操作系统申请 Monitor 管程，抢不到的线程强制剥夺 │
+│      CPU，进入 EntryList 阻塞队列休眠挂起！            │
+└────────────────────────────────────────────────────────┘
+```
+
+* **为什么锁不能降级？**
+  因为升级是根据业务运行期的竞争激烈度动态触发的，维持高阶锁状态可以避免低阶锁在频繁并发时反复触发撤销与升级的巨大开销。
+
+---
+
+### 7.4 `ReentrantLock` 与 AQS 核心底层原理（银行办事大厅比喻）
+
+`ReentrantLock` 的底层核心灵魂是 **AQS（`AbstractQueuedSynchronizer` 抽象队列同步器）**。
+
+很多同学看源码觉得 AQS 宛如天书，其实用 **“银行营业厅办事”** 的比喻一秒就能听懂：
+
+```
+                         AQS 银行营业厅模型
+┌────────────────────────────────────────────────────────┐
+│ 银行单一办事窗口 (只有一个柜台)                        │
+│   • state 状态指示灯:                                  │
+│     - 0 : 窗口空闲没人，谁先来谁办                      │
+│     - 1 : 正在办业务，其他人不能进                      │
+│     - >1: 同一个客户重复加办业务 (重入次数)            │
+│   • exclusiveOwnerThread: 记录当前坐在柜台前的客户是谁 │
+├────────────────────────────────────────────────────────┤
+│ 营业厅等候椅队列 (CLH 双向链表)                        │
+│   • 窗口有人时 (state > 0)，新来的客户拿着号牌，自觉坐到 │
+│     大厅的一长排连环等候椅 (Node 双向链表 FIFO) 上排队  │
+│   • LockSupport.park()   : 叫号系统让排队的客户闭目休眠 │
+│   • LockSupport.unpark() : 窗口柜员办完按铃，叫醒第一把 │
+│     椅子上的客户起身去办业务                            │
+└────────────────────────────────────────────────────────┘
+```
+
+* **加锁全流程（`lock()` 源码推导）**：
+  1. 线程调用 `lock()`，首先尝试通过 CAS 将 `state` 从 0 改为 1：
+     - 如果成功，将 `exclusiveOwnerThread` 设置为当前线程，成功持有锁；
+     - 如果失败（当前已有线程持有锁），判断持有者是不是自己：如果是自己，`state++`（实现**可重入**）；
+  2. 如果持有者不是自己：将当前线程封装成一个 `Node` 节点，通过 CAS 尾插法加入到 **CLH 双向链表队列的末尾**；
+  3. 调用 `LockSupport.park()` 将当前线程挂起休眠，让出 CPU；
+* **解锁全流程（`unlock()` 源码推导）**：
+  1. 线程调用 `unlock()`，`state--`；
+  2. 只有当 `state` 递减到 0 时，才将 `exclusiveOwnerThread` 置为 null，表示锁彻底释放；
+  3. 调用 `LockSupport.unpark(head.next)`，唤醒双向链表排在最前面的第一个等待线程，继续争抢锁。
+
+---
+
+### 7.5 三大并发控制手段深度对比：synchronized vs ReentrantLock vs 原子类 CAS
 
 | 对比维度 | `synchronized` (内置锁) | `ReentrantLock` (显式锁) | 原子类 `AtomicXxx` / CAS (无锁) |
 | :--- | :--- | :--- | :--- |
-| **底层原理** | JVM 关键字，基于对象监视器（`Monitor`：`monitorenter` / `monitorexit`），底层依赖 OS Mutex 互斥原语。 | JUC 提供的类，基于 **AQS（AbstractQueuedSynchronizer）** 同步队列与 `LockSupport.park()/unpark()`。 | 基于 CPU 硬件指令 **`CAS (Compare-And-Swap / cmpxchg)`** 实现的**乐观无锁（Lock-Free）**机制。 |
+| **底层实现** | JVM 关键字，基于对象监视器（`Monitor`：`monitorenter` / `monitorexit`），底层依赖 OS Mutex 互斥原语。 | JUC 提供的类，基于 **AQS（AbstractQueuedSynchronizer）** 同步队列与 `LockSupport.park()/unpark()`。 | 基于 CPU 硬件指令 **`CAS (Compare-And-Swap / cmpxchg)`** 实现的**乐观无锁（Lock-Free）**机制。 |
 | **锁的哲学** | **悲观锁**（认为冲突极高，每次都加锁并阻塞其他线程）。 | **悲观锁**（依然需要获取锁，但提供了超时、中断等灵活性）。 | **乐观锁**（认为冲突不高，先尝试直接修改，失败则自旋重试）。 |
+| **灵活性与功能**| 简单自动释放，**不支持超时、不支持中断、非公平**。 | **支持公平/非公平切换、支持 `tryLock()` 超时放弃、支持 `lockInterruptibly()` 可中断、支持多 Condition 条件队列**。 | 仅适用于单变量、简单数值/状态累加。 |
 | **线程状态** | 未获取到锁的线程进入 `BLOCKED` 阻塞态，触发**操作系统上下文切换（从用户态陷入内核态）**。 | 未获取到锁的线程进入 `WAITING` 状态（在 AQS 队列排队休眠），同样涉及上下文切换。 | **线程不休眠、不阻塞！** 保持 `RUNNING` 状态在 CPU 上快速自旋重试，**零线程切换开销**。 |
 | **性能表现** | 低并发下偏向锁/轻量级锁较快，**极高并发下吞吐急剧下降**。 | 高并发下比早期 synchronized 略优，但依然受限于锁竞争。 | **在简单读写/数值更新场景下吞吐最高（快一个数量级）**。 |
 | **通俗生活比喻** | **银行传统单一柜台**：每次只让一个人进小房间办业务，门外排长队，进出都要向保安（操作系统）报备登记。 | **VIP 预约制柜台**：依然是一次进一人，但可以设置“如果排队超过 5 分钟我就走（`tryLock`）”或者“根据排队号顺序叫号（公平锁）”。 | **自助自动取款机（ATM）群**：每个人直接插卡操作。如果按确认时发现屏幕显示“数据已被别人更新了”，机器自动帮你重新读一次并刷新屏幕（CAS 自旋重试），无需保安干预。 |
 
 ---
 
-### 7.2 为什么笔试题说“银行系统不要用 synchronized / ReentrantLock，而建议用原子类”？
+### 7.6 为什么笔试题说“银行系统不要用 synchronized / ReentrantLock，而建议用原子类”？
 
 * **原因 1：避免高频上下文切换与 CPU 性能雪崩**  
   在极高并发的银行账户充值/扣款场景中，使用 `synchronized` 或 `ReentrantLock` 会导致成千上万个线程陷入**阻塞（Blocked/Waiting）**。CPU 大量时间都在“挂起线程 $\rightarrow$ 保存现场 $\rightarrow$ 唤醒线程 $\rightarrow$ 恢复现场”的上下文切换上，有效业务处理时间严重被压缩。
@@ -330,7 +459,10 @@ while (!Thread.currentThread().isInterrupted()) {
 
 ---
 
-### 7.3 银行账户高并发编程题 · 满分代码实现 (Java 经典笔试题)
+### 7.7 银行账户高并发编程题 · 满分代码实现 (Java 经典笔试题)
+
+#### 题目要求：
+实现一个线程安全的银行账户 `BankAccount`，支持高并发下的 `deposit`（存款）、`withdraw`（取款，余额不足返回 false）、`getBalance`（查余额）以及账户间 `transfer`（转账）。
 
 #### 题目要求：
 实现一个线程安全的银行账户 `BankAccount`，支持高并发下的 `deposit`（存款）、`withdraw`（取款，余额不足返回 false）、`getBalance`（查余额）以及账户间 `transfer`（转账）。
@@ -582,8 +714,180 @@ for (int i = 0; i < 10; i++) {
 
 ---
 
-### 4. `CompletableFuture`（现代异步编排之王）
-* 支持非阻塞回调、多任务组合（`allOf` / `anyOf`）、异常捕获重试，彻底告别传统 `Future.get()` 阻塞等待的弊端。
+### 4. `CompletableFuture`（现代异步编排之王 · 深度企业级全家桶）
+
+> 💡 **历史痛点：为什么传统的 `Future` 必须被淘汰？**
+> 1. **`Future.get()` 是同步阻塞的**：主线程调了 `get()` 就必须死等结果，彻底丧失了异步非阻塞的意义；
+> 2. **`isDone()` 轮询浪费 CPU**：在结果出来前不断 while 循环轮询，极度消耗算力；
+> 3. **无法链式回调与多任务编排**：比如“任务 A 算完把结果传给任务 B，任务 B 和任务 C 汇合后再传给任务 D”，传统 `Future` 根本写不出来这种管道流（Pipeline）。
+
+Java 8 引入的 **`CompletableFuture`** 彻底解决了这一切，它是现代 Java 高并发微服务异步聚合的绝对核心！
+
+```
+                     CompletableFuture 核心方法拓扑全景
+┌────────────────────────────────────────────────────────────────────────┐
+│ 1. 任务创建  ──► runAsync (无返回值) / supplyAsync (有返回值)          │
+│                  ⚠️ 生产必须显式指定自定义业务线程池，禁用默认通用池！   │
+├────────────────────────────────────────────────────────────────────────┤
+│ 2. 串行接力  ──► thenApply (接收结果+返回新值) / thenAccept (消费不返回) │
+│                  thenRun (不关心上一步结果直接执行)                    │
+├────────────────────────────────────────────────────────────────────────┤
+│ 3. 双任务组合──► AND 汇合: thenCombine (两任务全完成，合并计算新结果)  │
+│                  OR 竞争 : applyToEither (谁先跑完就用谁的结果做转换)  │
+├────────────────────────────────────────────────────────────────────────┤
+│ 4. 多任务聚合──► allOf (所有任务全完成，用于商品详情页并发聚合)        │
+│                  anyOf (任一任务完成即返回，用于多通道竞速)            │
+├────────────────────────────────────────────────────────────────────────┤
+│ 5. 异常兜底  ──► exceptionally (异常降级返回默认值)                     │
+│                  handle (无论成败必执行，入参包含结果与异常，最通用)   │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 4.1 异步任务创建的两大方式与【生产级死穴避坑】
+
+* **无返回值**：`CompletableFuture.runAsync(Runnable, [Executor])`
+* **有返回值**：`CompletableFuture.supplyAsync(Supplier<U>, [Executor])`
+
+```java
+// ❌ 极其危险的生产反例（禁止使用！）：
+CompletableFuture.supplyAsync(() -> queryGoodsRpc()); // 默认使用 ForkJoinPool.commonPool()
+
+// ✅ 工业级规范推荐（必须传入自定义线程池！）：
+@Autowired
+private ThreadPoolExecutor customIoExecutor;
+
+CompletableFuture<GoodsVO> future = CompletableFuture.supplyAsync(() -> {
+    return goodsService.getDetail(goodsId);
+}, customIoExecutor);
+```
+
+> ⚠️ **生产血泪教训（面试必问避坑）**：  
+> 如果不传入自定义 `Executor`，底层默认使用 **`ForkJoinPool.commonPool()`**！该线程池是整个 JVM 全局共享的，默认线程数只有 `CPU 核心数 - 1`。如果你的异步任务涉及数据库慢查询、第三方 RPC 或网络 I/O 阻塞，**几个慢请求就会把这几个仅有的全局核心线程全部霸占打满，导致全系统所有其他的异步任务全部卡死瘫痪！**
+
+---
+
+#### 4.2 任务串行接力三兄弟（`thenApply` vs `thenAccept` vs `thenRun`）
+
+| 方法名 | 能否接收上一步的结果？ | 是否有返回值给下一步？ | 典型业务语义 |
+| :--- | :--- | :--- | :--- |
+| **`thenApply(Function<T, R>)`** | ✅ **能接收** 上一步计算结果 | ✅ **有新返回值**（转换后返回新对象） | 数据格式转换（如：查出 Order 实体 $\rightarrow$ 转换为 OrderVO）。 |
+| **`thenAccept(Consumer<T>)`** | ✅ **能接收** 上一步计算结果 | ❌ **无返回值**（返回 `Void`） | 终点消费（如：查出订单后，异步发一条短信通知）。 |
+| **`thenRun(Runnable)`** | ❌ **不关心** 上一步的结果 | ❌ **无返回值**（返回 `Void`） | 纯粹的时序触发（如：上一步做完了，清空一下本地临时缓存）。 |
+
+* **方法带 `Async` 与不带 `Async` 的线程归属区别**：
+  - `thenApply(...)`：默认使用**执行上一个任务的同一个线程**直接顺手执行回调，没有线程切换开销；
+  - `thenApplyAsync(..., executor)`：将回调逻辑作为新任务**重新提交到指定的线程池**中，由另一个工作线程并发执行。
+
+---
+
+#### 4.3 两个任务的组合编排（AND 汇合 vs OR 竞争）
+
+1. **AND 汇合（两个任务都完成才继续）**：
+   - **`thenCombine(otherFuture, BiFunction)`**：
+     ```java
+     CompletableFuture<Integer> f1 = CompletableFuture.supplyAsync(() -> 100);
+     CompletableFuture<Integer> f2 = CompletableFuture.supplyAsync(() -> 200);
+     // 等待 f1 和 f2 都执行完成，将结果相加得到 300
+     CompletableFuture<Integer> result = f1.thenCombine(f2, (r1, r2) -> r1 + r2);
+     ```
+   - **`thenAcceptBoth(otherFuture, BiConsumer)`**：等待两个都完成，消费结果，无返回值。
+2. **OR 竞争（任一任务率先完成就继续）**：
+   - **`applyToEither(otherFuture, Function)`**：
+     两个接口比拼速度（比如分别从本地 Redis 缓存和远程专线查汇率），谁先返回就用谁的结果做下一步转换；
+   - **`acceptEither(otherFuture, Consumer)`**：谁快消费谁。
+
+---
+
+#### 4.4 🏆 大厂核心实战：电商商品详情页并发聚合（`allOf`）
+
+在电商系统（包括本荒天商城）中，打开一个商品详情页需要查询 5 个下游服务：
+* 查商品基本信息（耗时 100ms）
+* 查实时价格（耗时 80ms）
+* 查库存与发货地（耗时 50ms）
+* 查优惠券与促销策略（耗时 60ms）
+* 查最新好评与热评（耗时 120ms）
+
+如果串行执行：$100 + 80 + 50 + 60 + 120 = \mathbf{410ms}$！用户页面会明显卡顿。  
+使用 **`CompletableFuture.allOf()`** 并行化重构：
+
+```java
+public ProductDetailVO getProductDetail(Long skuId) {
+    ProductDetailVO detailVO = new ProductDetailVO();
+
+    // 1. 异步并行发起 5 个独立的远程任务
+    CompletableFuture<Void> baseInfoFuture = CompletableFuture.runAsync(() -> {
+        detailVO.setBaseInfo(productRpc.getBaseInfo(skuId));
+    }, customIoExecutor);
+
+    CompletableFuture<Void> priceFuture = CompletableFuture.runAsync(() -> {
+        detailVO.setPrice(priceRpc.getRealtimePrice(skuId));
+    }, customIoExecutor);
+
+    CompletableFuture<Void> stockFuture = CompletableFuture.runAsync(() -> {
+        detailVO.setStock(stockRpc.getAvailableStock(skuId));
+    }, customIoExecutor);
+
+    CompletableFuture<Void> couponFuture = CompletableFuture.runAsync(() -> {
+        detailVO.setCoupons(couponRpc.getCoupons(skuId));
+    }, customIoExecutor);
+
+    CompletableFuture<Void> commentFuture = CompletableFuture.runAsync(() -> {
+        detailVO.setComments(commentRpc.getHotComments(skuId));
+    }, customIoExecutor);
+
+    // 2. allOf 聚合等待所有任务完成，整体耗时取决于最慢的那一个（120ms）！
+    // 耗时从 410ms 骤降到 120ms，性能飙升近 4 倍！
+    CompletableFuture.allOf(baseInfoFuture, priceFuture, stockFuture, couponFuture, commentFuture)
+                     .orTimeout(1, TimeUnit.SECONDS) // 设置 1 秒超时熔断防护
+                     .join(); // 阻塞等待聚合完毕
+
+    return detailVO;
+}
+```
+
+---
+
+#### 4.5 优雅异常处理三剑客
+
+异步调用一旦在子线程中抛出未捕获异常，主线程通常是感知不到的。必须进行显式异常捕获：
+
+1. **`exceptionally(Function<Throwable, ? extends T>)`**：
+   - 类似 `try-catch` 中的 `catch`。只有**发生异常时才触发**，并提供降级兜底默认值：
+     ```java
+     CompletableFuture<Integer> future = CompletableFuture.supplyAsync(() -> {
+         if (true) throw new RuntimeException("库存服务网络超时！");
+         return 100;
+     }).exceptionally(ex -> {
+         log.error("调用失败，触发降级，返回兜底库存0: {}", ex.getMessage());
+         return 0; // 兜底返回 0
+     });
+     ```
+2. **`handle(BiFunction<T, Throwable, R>)`（最通用、最强大）**：
+   - 类似 `try-finally`。**无论成功还是失败，必会执行**！入参包含 `(result, ex)`：
+     ```java
+     .handle((res, ex) -> {
+         if (ex != null) {
+             log.error("业务执行异常: {}", ex.getMessage());
+             return "Fallback Default Data";
+         }
+         return "Success: " + res;
+     });
+     ```
+3. **`whenComplete(BiConsumer<T, Throwable>)`**：
+   - 纯监听，只记录日志或监控打点，不改变返回结果。
+
+---
+
+#### 4.6 生产级四大避坑红线指南
+
+1. **`join()` vs `get()` 的选择**：
+   - `get()` 抛出受检异常（`ExecutionException`、`InterruptedException`），强制要求显式 `try-catch`，代码冗长；
+   - `join()` 抛出非受检异常（`CompletionException`），配合 Java 8 Stream 流式编程极其优雅，是目前大厂最主流首选；
+2. **ThreadLocal 异步传递丢失问题**：
+   - 异步回调可能由线程池中不同的子线程执行，主线程保存在 `ThreadLocal` 里的用户信息（如当前登录的 `userId`、租户 `tenantId`）会在异步线程中彻底丢失返回 `null`！
+   - **解决方案**：引入阿里巴巴开源的 **`TransmittableThreadLocal`（TTL）**，或者在提交任务前手动拷贝上下文；
+3. **同一个线程池嵌套 Future 导致的死锁**：
+   - 如果在同一个固定大小线程池的任务内，又同步调用 `future.join()` 等待该线程池内的另一个子任务，当并发高时所有线程都在等待子任务完成，而子任务在队列中无线程可执行，引发**全线程池死锁崩溃**！生产应按业务划分不同线程池隔离。
 
 ---
 
