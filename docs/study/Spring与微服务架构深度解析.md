@@ -30,6 +30,7 @@
   * **4.1 AOP 事务自调用失效与 `REQUIRES_NEW` 独立类解耦（KnowledgeIngestTxService）**
   * **4.2 双拦截器链无感刷新设计（LoginInterceptor + RefreshTokenInterceptor）**
   * **4.3 Spring 事件驱动解耦（ApplicationEventPublisher）**
+* **五、 Spring 与微服务架构 15 道大厂高频面试真题与标准满分应答**
 
 ---
 
@@ -63,9 +64,18 @@ Spring IoC 容器的核心启动入口是 `AbstractApplicationContext.refresh()`
 
 ---
 
-### 1.2 Bean 的完整生命周期（四步记忆法）
+### 1.2 Bean 的完整生命周期（极通俗四步记忆法 · 小白必读）
 
-面试中问到“Spring Bean 的生命周期”，切忌死记硬背十几步，按照 **“实例化 -> 属性填充 -> 初始化 -> 销毁”** 四大阶段回答即可拿满分：
+> 💡 **小白通俗比喻：一个人的“生老病死与成人礼”**
+> 很多同学看到 Spring 源码里几十个接口、各种 Processor 感觉头皮发麻。其实，一个 Bean 的一生就跟一个人的一生完全一模一样：
+> 1. **生娃落地（实例化 Instantiation）**：调用构造方法 `new` 出来，此时只是一个**刚出生的肉身空壳**（在堆中开辟了内存，但所有属性全都是 `null`）；
+> 2. **穿衣吃饭长肉（属性填充 Populate Bean / DI）**：通过 `@Autowired` 把手、脚、衣服给它装上（给成员变量注入真实的依赖对象）；
+> 3. **上学识字与成人礼（初始化 Initialization）**：
+>    - ① 记住自己的身份证和家庭地址（**`Aware` 接口**：`BeanNameAware` 知道自己叫啥名，`ApplicationContextAware` 拿到整个容器）；
+>    - ② 戴上校徽（**`BeanPostProcessor.postProcessBeforeInitialization`**，执行 `@PostConstruct` 注解）；
+>    - ③ 举行成人礼（**`InitializingBean.afterPropertiesSet()`**，执行自定义初始化逻辑）；
+>    - ④ **穿上钢铁侠战甲（`BeanPostProcessor.postProcessAfterInitialization` 🌟）**：如果这个 Bean 配置了事务 `@Transactional` 或切面 `@Aspect`，**就在这里给它套上一层 AOP 动态代理外壳！**
+> 4. **寿终正寝（销毁 Destruction）**：应用关闭时，执行 `@PreDestroy`，交代遗嘱，释放数据库连接与线程资源。
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -93,18 +103,19 @@ Spring IoC 容器的核心启动入口是 `AbstractApplicationContext.refresh()`
 ### 1.3 三级缓存与循环依赖底层破解
 
 #### 什么是循环依赖？
-A 类依赖 B 类（`@Autowired private B b;`），同时 B 类又依赖 A 类（`@Autowired private A a;`）。
+A 类依赖 B 类（`@Autowired private B b;`），同时 B 类又依赖 A 类（`@Autowired private A a;`）。如果不做任何处理，A 建到一半去建 B，B 建到一半又去建 A，就会陷入**死循环（StackOverflowError）**！
 
-#### Spring 的三级缓存架构（`DefaultSingletonBeanRegistry`）：
+#### 为什么是“三级”缓存？（房产全景生活比喻）
+Spring 用了 3 个 Map 来化解死循环：
+* **一级缓存 `singletonObjects`（精装成品现房）**：完全造好的、属性也填满了、初始化完毕的成熟 Bean。**对外直接拎包入住**；
+* **二级缓存 `earlySingletonObjects`（毛坯半成品房）**：刚 `new` 出来分配了内存地址、但**还没接水电刮腻子（属性还是 null）的半成品 Bean**；
+* **三级缓存 `singletonFactories`（图纸与施工队 ObjectFactory）**：存放一个生成对象的工厂（Lambda 表达式）。**专门解决“防盗门定制（AOP 动态代理）”**！
+
 ```java
-// 一级缓存：单例池，存放完全初始化好的成品 Bean
-private final Map<String, Object> singletonObjects = new ConcurrentHashMap<>(256);
-
-// 二级缓存：存放已实例化、但尚未填充属性与初始化的半成品 Bean（提前曝光对象）
-private final Map<String, Object> earlySingletonObjects = new HashMap<>(16);
-
-// 三级缓存：单例工厂池，存放生成 Bean（或其 AOP 代理对象）的 ObjectFactory Lambda
-private final Map<String, ObjectFactory<?>> singletonFactories = new HashMap<>(16);
+// DefaultSingletonBeanRegistry 源码定义：
+private final Map<String, Object> singletonObjects = new ConcurrentHashMap<>(256); // 一级
+private final Map<String, Object> earlySingletonObjects = new HashMap<>(16);        // 二级
+private final Map<String, ObjectFactory<?>> singletonFactories = new HashMap<>(16); // 三级
 ```
 
 #### 循环依赖解决全流程（以 A、B 互相依赖为例）：
@@ -116,12 +127,15 @@ private final Map<String, ObjectFactory<?>> singletonFactories = new HashMap<>(1
 6. B 成功注入 A，完成初始化并放入一级缓存；
 7. A 继续流程，成功注入 B，完成初始化并放入一级缓存。
 
-#### 💡 核心考点：为什么必须是三级缓存？二级缓存不够用吗？
-* **如果只有普通 Bean（无 AOP 代理）**：其实**二级缓存完全足够**；
-* **为什么必须加第三级 `ObjectFactory`？**：
-  * Spring 的设计原则是 **AOP 代理对象在 Bean 初始化的最后一步（`postProcessAfterInitialization`）才创建**；
-  * 如果没有第三级缓存，必须在一开始实例化完就无脑生成 AOP 代理，这违反了 Spring 统一的生命周期规范；
-  * 通过三级缓存，只有在**真正发生循环依赖时**，才通过 `ObjectFactory` 提前生成 AOP 代理对象并放入二级缓存；若没有循环依赖，AOP 代理依然在最后的标准阶段正常生成！
+#### 💡 核心考点：为什么必须是三级缓存？只保留两级缓存够用吗？
+* **如果只有普通 Bean（没有 AOP 动态代理）**：
+  **两级缓存完全够用！** 一级放成品，二级放提前曝光的毛坯半成品即可。
+* **为什么必须加第三级 `ObjectFactory`？（灵魂拷问！）**：
+  - Spring 的核心设计原则是：**AOP 代理对象必须在 Bean 生命周期的最后一步（初始化后 `postProcessAfterInitialization`）才统一创建！**
+  - 如果只用二级缓存，意味着只要一个对象刚 `new` 出来，Spring 就必须**不管三七二十一立刻给它创建 AOP 代理对象塞进二级缓存**！这彻底打乱破坏了 Spring 的生命周期统一规范！
+  - **三级缓存的妙处在于“延迟与按需”**：平时只放一张图纸（ObjectFactory）。**只有在真正发生循环依赖被别人注入时**，才临时由图纸提前把 AOP 代理造出来放入二级缓存；如果没有循环依赖，它依然规规矩矩在最后的标准阶段生成代理！完美兼顾了规范与性能！
+* **追问：构造器注入能解决循环依赖吗？**
+  - **不能！** 构造器注入连最开始的 `new` 实例化肉身都无法完成，无法提前暴露引用，直接抛出 `BeanCurrentlyInCreationException`。可加 `@Lazy` 延迟注入解决。
 
 ---
 
@@ -434,3 +448,147 @@ Spring Cloud Gateway 底层基于 **Spring 5 WebFlux + Netty 响应式非阻塞�
 ### 4.3 Spring 事件驱动解耦（`ApplicationEventPublisher`）
 
 在用户长期记忆模块中，我们使用 Spring 的 `ApplicationEventPublisher` 发布 `MemoryChangedEvent`，由 `@Async` 异步事件监听器消费执行画像构建，实现了**用户对话主链路与后台画像分析的完全异步解耦**。
+
+---
+
+## 五、 Spring 与微服务架构 15 道大厂高频面试真题与标准满分应答
+
+### Q1：什么是 IoC（控制反转）和 DI（依赖注入）？底层是如何实现的？
+* **满分回答**：
+  > “1. **核心概念与生活比喻**：
+  >    - **传统模式（自己造车）**：我要一台电脑，我自己手动 `new CPU()`、`new Memory()`，如果 CPU 构造函数改了，所有代码全崩，耦合极高；
+  >    - **IoC（电脑组装厂）**：把创建对象和管理对象生命周期的控制权，从程序员手中**反转交给了 Spring 容器**；
+  >    - **DI（送货上门）**：容器在创建好对象后，主动通过构造器或属性注解（`@Autowired`）把依赖的对象**注入进去**。
+  > 2. **底层实现机制**：
+  >    - 底层基于 **工厂设计模式 + XML/注解元数据解析 + Java 反射机制（Reflection） + 单例缓存池（ConcurrentHashMap）** 实现。”
+
+### Q2：Spring Bean 的完整生命周期是怎样的？
+* **满分回答**：
+  > “切忌死记硬背十几步，在面试中直接分 **四大核心阶段（生老病死与成人礼）** 回答：
+  > 1. **实例化（Instantiation）**：调用构造函数在堆中开辟内存空间，生成一个属性全为 null 的空壳肉身；
+  > 2. **属性填充（Populate Bean）**：解析 `@Autowired`、`@Value`，将依赖的 Bean 引用和配置值注入；
+  > 3. **初始化（Initialization）**：
+  >    - ① 触发 `Aware` 接口（`BeanNameAware`、`ApplicationContextAware` 获取容器资源）；
+  >    - ② 触发 `BeanPostProcessor.postProcessBeforeInitialization`（执行 `@PostConstruct`）；
+  >    - ③ 触发 `InitializingBean.afterPropertiesSet()` 或自定义 `init-method`；
+  >    - ④ 触发 `BeanPostProcessor.postProcessAfterInitialization`（**AOP 动态代理外壳在此处统一生成！**）；
+  > 4. **销毁（Destruction）**：容器关闭时执行 `@PreDestroy` 或 `DisposableBean.destroy()` 释放物理资源。”
+
+### Q3：Spring 如何解决循环依赖？为什么必须是三级缓存而不是二级？构造器注入为什么无法解决？
+* **满分回答**：
+  > “1. **三级缓存角色**：
+  >    - 一级缓存（成品单例池）：已完全初始化好的可用 Bean；
+  >    - 二级缓存（半成品池）：已实例化但未填充属性的毛坯 Bean；
+  >    - 三级缓存（工厂池）：存放包装了 `getEarlyBeanReference` 的 `ObjectFactory` Lambda。
+  > 2. **为什么必须是三级缓存？**
+  >    - 如果没有 AOP，二级缓存完全足够；
+  >    - 但如果存在 AOP，Spring 原则规定**代理对象必须在 Bean 初始化完成之后统一生成**。如果不加第三级缓存，每次实例化完就必须无脑提前生成代理对象塞进二级缓存，破坏了生命周期统一规范！三级缓存通过工厂实现了**‘按需且延迟生成 AOP 代理’**；
+  > 3. **构造器注入为什么不能解决？**
+  >    - 构造器注入连第 1 步实例化肉身都无法完成，对象引用根本无法产生，无法提前曝光，直接报 `BeanCurrentlyInCreationException`（可用 `@Lazy` 注解破局）。”
+
+### Q4：JDK 动态代理和 CGLIB 动态代理有什么本质区别？Spring Boot 默认采用哪一个？
+* **满分回答**：
+  > “1. **本质区别**：
+  >    - **JDK 动态代理（基于接口）**：利用 `java.lang.reflect.Proxy` 在内存中生成一个实现了目标接口的代理类 `$Proxy0`。目标类必须实现至少一个接口；
+  >    - **CGLIB 动态代理（基于继承）**：利用 ASM 字节码框架动态生成目标类的**子类**，覆盖父类非 final 方法。目标类和方法不能被 `final` 修饰。
+  > 2. **Spring Boot 默认选择**：
+  >    - 在 Spring Boot 1.x 中，有接口走 JDK，无接口走 CGLIB；
+  >    - **从 Spring Boot 2.x 和 3.x 开始，默认全面采用 CGLIB 代理**（配置 `spring.aop.proxy-target-class=true`），避免因类型强转引发的 `ClassCastException`。”
+
+### Q5：Spring 事务在什么情况下会失效？列举至少 6 种场景并说明底层原因
+* **满分回答**：
+  > “底层都是因为**绕过了 Spring AOP 动态代理机制或底层数据库机制**：
+  > 1. **同类内部方法直接自调用（最经典）**：如 `this.b()`，走的是原生对象而不是 AOP 代理对象，事务拦截器根本不会执行；
+  > 2. **方法非 `public` 修饰**：Spring AOP 事务切面只拦截 public 方法；
+  > 3. **异常被内部 `try-catch` 吃掉**：没有向上抛出给 AOP 拦截器，事务认为执行成功正常提交；
+  > 4. **抛出了未声明的受检异常（Checked Exception）**：`@Transactional` 默认只回滚 `RuntimeException` 和 `Error`，抛出 `IOException` 不回滚（解决：显式加 `rollbackFor = Exception.class`）；
+  > 5. **方法内部开启了新子线程**：由于底层事务与数据库连接是绑定在 `ThreadLocal` 上的，子线程拿不到主线程的事务连接，无法合并回滚；
+  > 6. **数据库引擎不支持事务**：如 MySQL 依然使用 MyISAM 引擎。”
+
+### Q6：Spring 事务的 7 大传播行为（Propagation）有哪些？`REQUIRED` 和 `REQUIRES_NEW` 的区别？
+* **满分回答**：
+  > “1. **最核心两大传播**：
+  >    - **`REQUIRED`（默认）**：若外层有事务则加入，若无则新建。内外层属于同一个物理事务，任何一处异常**全军覆没整体回滚**；
+  >    - **`REQUIRES_NEW`**：无论外层有无事务，**都挂起外层事务，自己开启一个全新的独立物理事务**。自己的提交或回滚与外层事务完全隔离。
+  > 2. **其他常见传播**：
+  >    - **`NESTED`（嵌套事务）**：基于数据库 Savepoint 保存点实现，子事务异常只回滚到保存点，不影响外层事务；
+  >    - **`SUPPORTS`**：外层有就支持，无就非事务跑；
+  >    - **`NOT_SUPPORTED`**：挂起外层事务以非事务跑；
+  >    - **`NEVER`**：存在事务直接抛异常；
+  >    - **`MANDATORY`**：必须在已有事务中跑，否则抛异常。”
+
+### Q7：Spring Boot 自动装配（Auto-Configuration）的底层原理是什么？`@EnableAutoConfiguration` 做了什么？
+* **满分回答**：
+  > “1. **核心注解**：`@SpringBootApplication` 内部组合了 `@EnableAutoConfiguration`；
+  > 2. **加载 SPI 文件**：该注解通过 `@Import(AutoConfigurationImportSelector.class)`，在应用启动时去扫描 ClassPath 下所有 Jar 包中的 `META-INF/spring.factories`（或 Spring 3.x 的 `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`）；
+  > 3. **条件装配过滤（按需加载）**：读取到上百个 `XxxAutoConfiguration` 候选类后，不会全量实例化，而是利用类上的 **`@ConditionalOnClass`、`@ConditionalOnMissingBean`、`@ConditionalOnProperty`** 等条件注解进行过滤，只有应用引入了对应 Starter 依赖且用户没有自定义该 Bean 时，才自动装配默认 Bean。”
+
+### Q8：`@SpringBootApplication` 由哪些核心元注解组成？各自有什么作用？
+* **满分回答**：
+  > “它是一个复合注解，核心包含 3 个元注解：
+  > 1. **`@SpringBootConfiguration`**：底层就是 `@Configuration`，声明当前类为配置类，允许定义 `@Bean`；
+  > 2. **`@EnableAutoConfiguration`**：开启 Spring Boot 自动化装配机制（通过 SPI 导入自动化配置类）；
+  > 3. **`@ComponentScan`**：自动扫描当前启动类所在包及其子包下的 `@Component`、`@Service`、`@Controller` 等组件注入 IoC 容器。”
+
+### Q9：如何自定义实现一个符合大厂规范的 Spring Boot Starter？
+* **满分回答**：
+  > “按照标准工程四步法：
+  > 1. **创建属性配置映射类**：定义 `@ConfigurationProperties(prefix = "my.starter")`，绑定 application.yml 中的参数；
+  > 2. **编写核心业务客户端/服务类**：实现具体的工具逻辑（如短信发送客户端、API 鉴权客户端）；
+  > 3. **创建自动化配置类**：编写 `MyStarterAutoConfiguration`，加上 `@Configuration`、`@EnableConfigurationProperties`，并在方法上加 `@ConditionalOnMissingBean` 注入客户端 Bean；
+  > 4. **配置 SPI 发现文件**：在 `resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports` 中写入该配置类的全限定类名，打包供下游引入即用。”
+
+### Q10：Nacos 和 Eureka 作为微服务注册中心有什么核心区别？Nacos 的心跳与临时/持久化实例机制？
+* **满分回答**：
+  > “1. **CAP 模型区别**：
+  >    - **Eureka**：严格遵循 **AP 模型**（优先保证高可用，集群去中心化 Peer-to-Peer 复制）；
+  >    - **Nacos**：**支持 AP 和 CP 模式动态切换**！默认临时实例走 AP（Distro 协议），持久化实例走 CP（Raft 协议）。
+  > 2. **实例类型与心跳机制**：
+  >    - **临时实例（默认）**：客户端每隔 5 秒向 Nacos 发送心跳，若 15 秒未收到心跳标记为不健康，若 30 秒未收到直接从注册表剔除；
+  >    - **持久化实例**：由 Nacos 服务端主动探测客户端健康状态，宕机绝不剔除，只标为不健康，适合 MySQL、网关等基础服务。”
+
+### Q11：Nacos 动态配置中心是如何做到秒级刷新配置的？（长轮询 Long Polling 底层原理）
+* **满分回答**：
+  > “1. **传统轮询痛点**：定时轮询间隔短费 CPU，间隔长有延迟；
+  > 2. **Nacos 基于 HTTP 异步 Servlet 的长轮询（Long Polling）**：
+  >    - 客户端发起配置查询请求，超时时间设为 30 秒；
+  >    - 服务端收到请求后比对 MD5：若配置未变更，**服务端并不立即返回，而是利用 `AsyncContext` 将请求挂起（挂起 29.5 秒）**；
+  >    - 一旦运营后台在 30 秒内修改了配置，服务端会触发变更事件**立即唤醒被挂起的请求并返回给客户端（延迟 < 50ms）**；
+  >    - 客户端收到响应后主动拉取最新配置，并立刻发起下一次长轮询，实现了秒级推送且兼顾服务器低开销！”
+
+### Q12：OpenFeign 的底层调用原理是什么？如何实现请求拦截与超时重试？
+* **满分回答**：
+  > “1. **底层调用原理**：
+  >    - 启动时扫描 `@FeignClient` 注解，利用 JDK 动态代理生成代理对象；
+  >    - 调用接口方法时，通过 `InvocationHandler` 解析方法上的 SpringMVC 注解（如 `@GetMapping`、`@PathVariable`），拼接成完整的 HTTP 请求元数据；
+  >    - 整合 `Spring Cloud LoadBalancer` 从注册中心获取目标服务的一个可用实例 IP 和端口，发起真实的 HTTP 调用（推荐整合 OkHttp / HttpClient 连接池避免连接频繁创建）；
+  > 2. **请求拦截与透传**：实现 `RequestInterceptor` 接口，在 `apply(RequestTemplate template)` 方法中将主线程的 `TraceId` 或前端 JWT Token 塞入请求头向下游透传。”
+
+### Q13：Sentinel 的滑动窗口限流算法原理是什么？和固定窗口、令牌桶比有什么区别？
+* **满分回答**：
+  > “1. **滑动窗口原理（`LeapArray`）**：
+  >    - 将 1 秒的大窗口切分成多个（如 2 个 500ms）小格（Bucket）；
+  >    - 随时间推移，旧的 Bucket 自动过期滑出，窗口只统计当前时间往前推 1 秒内的请求总和；
+  >    - 彻底消除了**固定窗口在 0.9 秒和 1.1 秒交界处并发翻倍击垮系统的临界双倍流量缺陷**；
+  > 2. **对比令牌桶**：滑动窗口更偏向平滑限流与拦截突发；令牌桶（如 Guava RateLimiter）允许在有空余令牌时支持预借和突发流量。”
+
+### Q14：Spring Cloud Gateway 的底层架构与过滤器执行链路是怎样的？如何实现全局 JWT 鉴权？
+* **满分回答**：
+  > “1. **底层架构**：基于 **Spring 5 WebFlux + Reactor + Netty 响应式非阻塞 I/O** 架构，单机吞吐量远超传统基于 Servlet 阻塞式的 Zuul 1.x。
+  > 2. **执行链路（三层流转）**：
+  >    - **Route（路由）**：客户端请求到来，由 HandlerMapping 匹配路由；
+  >    - **Predicate（断言）**：判断请求路径、请求头是否符合规则；
+  >    - **Filter（过滤器链）**：采用责任链模式，执行 Pre 过滤器（鉴权、限流、改写请求）$\rightarrow$ 路由转发 $\rightarrow$ 执行 Post 过滤器（修改响应头、记录链路耗时日志）。
+  > 3. **全局鉴权实践**：自定义类实现 `GlobalFilter` 和 `Ordered`，在 `filter()` 中拦截请求头 `Authorization`，若无 Token 或 Token 验签失败直接返回 `HttpStatus.UNAUTHORIZED (401)` 并中断拦截链；验签成功后将 `userId` 透传写入 `ServerWebExchange`。”
+
+### Q15：微服务分布式事务有哪些解决方案？（Seata AT/TCC/XA、本地消息表、RocketMQ 半消息事务）各自优缺点？
+* **满分回答**：
+  > “1. **Seata AT 模式（零侵入首选）**：
+  >    - *原理*：二阶段提交。一阶段自动生成前镜像（Before Image）和后镜像（After Image）并提交本地事务；二阶段若成功异步删除镜像，若失败根据镜像生成反向 SQL 回滚；
+  >    - *优缺点*：业务无侵入开发极快；但依赖全局锁（Global Lock），高并发热点行更新吞吐较低；
+  > 2. **TCC 模式（高性能金融首选）**：
+  >    - *原理*：业务层手动实现 `Try`（资源冻结）、`Confirm`（真正扣除）、`Cancel`（释放冻结资源）；
+  >    - *优缺点*：不加全局锁性能极高；但业务代码侵入极重，必须手动防空回滚、幂等与悬挂；
+  > 3. **RocketMQ 半消息事务（最终一致性霸主）**：
+  >    - *原理*：发送 Half 消息 $\rightarrow$ 执行本地事务 $\rightarrow$ 提交/回滚消息 $\rightarrow$ 消费端重试消费；
+  >    - *优缺点*：完全解耦，性能最高，支持重试补偿，是互联网大厂非强一致业务的最主流首选！”
