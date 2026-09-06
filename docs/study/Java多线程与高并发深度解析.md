@@ -911,21 +911,61 @@ public ProductDetailVO getProductDetail(Long skuId) {
 2. **Value 的强引用链依然存活**：由于线程池中的核心线程是**长久存活、反复复用的**，该线程身上的引用链 `Thread -> ThreadLocalMap -> Entry -> Value` 始终强引用可达！
 3. **后果**：Value 占用的堆内存永远无法被 GC 回收，随着不断产生请求，内存被逐步蚕食，最终引发 **`OutOfMemoryError: Java heap space`**！
 
-### 12.3 最佳实践（防御性编程）
-* **铁律**：**使用 `ThreadLocal` 必须配套 `try-finally`，在 `finally` 块中显式调用 `remove()` 清除！**
+---
 
-```java
-public static final ThreadLocal<UserContext> USER_HOLDER = new ThreadLocal<>();
+### 12.3 结合项目真实落地（我在《荒天商城》中怎么用的？）
 
-public void handleRequest(HttpRequest request) {
-    try {
-        USER_HOLDER.set(parseUser(request));
-        doBusiness();
-    } finally {
-        USER_HOLDER.remove(); // 必须显式清理，防止线程池复用引发内存泄漏与脏数据！
-    }
-}
-```
+#### ① 用户身份隔离上下文与防泄漏拦截器（`UserHolder` + `RefreshInterceptor`）
+* **落地代码**（[`UserHolder.java`](file:///Users/momingqin/study/IT/huangtian/huangtian-goods/src/main/java/com/scutmmq/utils/UserHolder.java)）：
+  ```java
+  public class UserHolder {
+      private static final ThreadLocal<UserDTO> threadLocal = new ThreadLocal<>();
+
+      public static void saveUser(UserDTO userDTO) { threadLocal.set(userDTO); }
+      public static UserDTO getUser() { return threadLocal.get(); }
+      public static void removeUser() { threadLocal.remove(); } // 必须显式清理！
+  }
+  ```
+* **拦截器生命周期配合**（[`RefreshInterceptor.java`](file:///Users/momingqin/study/IT/huangtian/huangtian-goods/src/main/java/com/scutmmq/interceptor/RefreshInterceptor.java#L39)）：
+  ```java
+  @Override
+  public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) {
+      // 核心铁律：请求处理完毕，必须在 afterCompletion 阶段移除当前线程的用户信息！
+      UserHolder.removeUser();
+  }
+  ```
+* **【为什么必须在 `afterCompletion` 中 remove？】（面试必考陷阱！）**：
+  1. **防止内存泄漏**：Tomcat 采用工作线程池复用线程。若不调用 `remove()`，该线程永远持有上一个用户的 `UserDTO` 强引用，导致内存泄漏；
+  2. **防止用户身份串号（严重越权漏洞 IDOR）**：若该工作线程被 Tomcat 回收后分配给下一个陌生用户使用，若新用户的请求没有覆盖 `saveUser()`，新请求将**直接读取到上一个用户的私密信息，造成灾难性数据越权事故！**
+
+#### ② 异步线程池/AI Agent 工具执行时的“上下文丢失”破局（`MallUserContextExecutor`）
+* **业务痛点**：商城引入了 AI 数字导购与异步审计任务，当主线程将任务提交到异步线程池（`ThreadPoolTaskExecutor`）或 AI Agent 调度工具执行时，**子线程无法获取主线程 Tomcat 的 `ThreadLocal` 用户信息**，导致工具内部报错 `User is null`！
+* **落地代码**（[`MallUserContextExecutor.java`](file:///Users/momingqin/study/IT/huangtian/huangtian-goods/src/main/java/com/scutmmq/ai/util/MallUserContextExecutor.java)）：
+  ```java
+  public final class MallUserContextExecutor {
+      public static <T> T runAs(UserDTO user, Supplier<T> action) {
+          UserDTO previous = UserHolder.getUser();
+          try {
+              UserHolder.saveUser(user); // 显式注入当前目标用户
+              return action.get();
+          } finally {
+              if (previous != null) {
+                  UserHolder.saveUser(previous); // 恢复原有上下文
+              } else {
+                  UserHolder.removeUser();       // 干净释放，防止污染线程池
+              }
+          }
+      }
+  }
+  ```
+
+---
+
+### 12.4 🚀 面试官高频延伸追问与反杀话术
+* **追问 1**：“Java 原生的 `InheritableThreadLocal` 为什么不能解决线程池中的上下文传递问题？”
+  - **反杀话术**：“`InheritableThreadLocal`（ITL）只能在**父线程 `new Thread()` 创建新子线程时**，在 `Thread.init()` 方法中拷贝一次父线程的变量。然而在生产环境中，我们使用的是**线程池（Thread Pool）**，池中的工作线程早已提前创建并反复复用，后续任务提交时根本不会触发线程创建逻辑，因此 ITL 彻底失效！工业界大厂标准的跨线程池透传方案是采用阿里巴巴开源的 **`TransmittableThreadLocal`（TTL）**，通过代理 `Runnable` 或 `Executor` 在任务提交与执行时动态完成抓取与回放。”
+* **追问 2**：“ThreadLocalMap 底层解决哈希冲突用的是拉链法吗？”
+  - **反杀话术**：“**不是！用的是【线性探测法（Linear Probing）】**！即当计算出的哈希槽位被占用时，不会挂链表，而是直接向后寻找下一个相邻的空槽位（`i = (i + 1) % len`）。因此 ThreadLocalMap 的数组负载因子通常保持在较低水平（$2/3$），以减少探测聚集冲突。”
 
 ---
 
