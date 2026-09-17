@@ -99,145 +99,164 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
             return Result.error("订单不能为空!");
         }
 
-        // 3.1.1 下单幂等：基于「用户+收货地址+商品清单」指纹，短窗口去重，拦截连点/重复提交
+        // 3.1.1 下单幂等与防并发重复提交：基于「用户+收货地址+商品清单」指纹的 Redisson 分布式锁（带看门狗自动续期）
         StringBuilder fingerprint = new StringBuilder();
         fingerprint.append(userId).append(':').append(ordersDTO.getShippingAddressId());
         orderItemsDTOS.stream()
                 .sorted(Comparator.comparing(OrderItemsDTO::getProductId))
                 .forEach(it -> fingerprint.append('|').append(it.getProductId()).append('x').append(it.getQuantity()));
         String dedupKey = ORDER_SUBMIT_DEDUP + SecureUtil.md5(fingerprint.toString());
-        Boolean acquired = redisTemplate.opsForValue().setIfAbsent(dedupKey, "1", 5, TimeUnit.SECONDS);
-        if(!Boolean.TRUE.equals(acquired)){
+
+        RLock submitLock = redissonClient.getLock(dedupKey);
+        boolean acquired = false;
+        try {
+            // 尝试加锁：等待0秒（快速失败，防重复点击），不设leaseTime以激活 Redisson Watchdog 自动续期
+            acquired = submitLock.tryLock(0, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return Result.error("系统繁忙，请稍后再试");
+        }
+        if (!acquired) {
             return Result.error("请勿重复提交，请稍后再试");
         }
 
-        // 3.2 校验收获地址是否存在
-        Long shippingAddressId = ordersDTO.getShippingAddressId();
-        UserAddress shippingAddress = userAddressMapper.selectById(shippingAddressId);
-        if (shippingAddress == null || !shippingAddress.getUserId().equals(userId)) {
-            return Result.error("收货地址不存在或不属于当前用户");
-        }
+        try {
+            // 3.2 校验收获地址是否存在
+            Long shippingAddressId = ordersDTO.getShippingAddressId();
+            UserAddress shippingAddress = userAddressMapper.selectById(shippingAddressId);
+            if (shippingAddress == null || !shippingAddress.getUserId().equals(userId)) {
+                return Result.error("收货地址不存在或不属于当前用户");
+            }
 
-        // 3.3 校验库存是否充足
-        List<OrderItems> orderItemsList = new ArrayList<>();
-        BigDecimal totalAmount = BigDecimal.ZERO; // 订单总金额
-        Long merchantId = null; // 假设订单中所有商品属于同一商家（若支持多商家需调整逻辑）
+            // 3.3 校验库存是否充足
+            List<OrderItems> orderItemsList = new ArrayList<>();
+            BigDecimal totalAmount = BigDecimal.ZERO; // 订单总金额
+            Long merchantId = null; // 假设订单中所有商品属于同一商家（若支持多商家需调整逻辑）
 
+            for(OrderItemsDTO orderItemsDTO:orderItemsDTOS){
 
-        for(OrderItemsDTO orderItemsDTO:orderItemsDTOS){
+                // 查询商品
+                Product product = productService.lambdaQuery().eq(Product::getId, orderItemsDTO.getProductId()).one();
 
-            // 查询商品
-            Product product = productService.lambdaQuery().eq(Product::getId, orderItemsDTO.getProductId()).one();
-
-            // 校验库存 lock+lua
-            String key = LOCK_STOCK + orderItemsDTO.getProductId();
-            final RLock lock = redissonClient.getLock(key);
-            boolean isLock = false;
-
-            try {
                 if (merchantId == null ? (merchantId = product.getMerchantId()) == null : !merchantId.equals(product.getMerchantId())) {
-                    throw  new BusinessException("暂不支持跨商家下单，请分开结算");
+                    throw new BusinessException("暂不支持跨商家下单，请分开结算");
                 }
 
                 if(merchantId.equals(myMerchantId)){
                     throw new BusinessException("不能购买自己售卖的的商品");
                 }
 
-                isLock = lock.tryLock(3, TimeUnit.SECONDS);
-                if(!isLock){
-                    log.info("获取锁{}失败",key);
-                    return Result.error("下单过忙，请重试");
+                // 确保 Redis 有该商品库存快照（DCL 模式：仅在冷启动/未命中时获取 Redisson 互斥锁同步 DB，热点秒杀 99.9% 走纯内存无锁 Lua）
+                String stockKey = PRODUCT_STOCK_AVAILABLE + orderItemsDTO.getProductId();
+                if (!Boolean.TRUE.equals(redisTemplate.hasKey(stockKey))) {
+                    String lockKey = LOCK_STOCK + orderItemsDTO.getProductId();
+                    final RLock lock = redissonClient.getLock(lockKey);
+                    boolean isLock = false;
+                    try {
+                        isLock = lock.tryLock(3, TimeUnit.SECONDS);
+                        if (isLock) {
+                            // DCL 双重检查：拿锁后再查一次，防止排队期间已有线程初始化完毕
+                            if (!Boolean.TRUE.equals(redisTemplate.hasKey(stockKey))) {
+                                redisUtils.synchronizeUpdateStock(product.getId(), product.getStockQuantity());
+                            }
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        if (isLock) {
+                            lock.unlock();
+                        }
+                    }
                 }
-                log.info("获取锁{}成功",key);
-                // 确保 Redis 有该商品库存快照（AI下单等场景可能跳过商品详情页，导致 key 不存在）
-                // 持锁内同步，保证原子性：synchronizeUpdateStock 会用 DB 当前值减去已有预占，写入 available key
-                redisUtils.synchronizeUpdateStock(product.getId(), product.getStockQuantity());
-                // TODO 调用LUA脚本查询库存，预占库存
-                Long flag = redisUtils.ReserveStock(
-                        orderItemsDTO.getProductId(), orderItemsDTO.getQuantity(), tempOrderId);
-                if(flag != 1L){
-                    throw  new BusinessException("非常抱歉，商品已被他人下单");
+
+                // 高并发主链路：完全在无锁状态下，由 Lua 脚本在纯内存中秒级原子预占！
+                try {
+                    Long flag = redisUtils.ReserveStock(
+                            orderItemsDTO.getProductId(), orderItemsDTO.getQuantity(), tempOrderId);
+                    if(flag != 1L){
+                        throw new BusinessException("非常抱歉，商品已被他人下单");
+                    }
+                } catch (Exception e) {
+                    // 回退redis
+                    rollBackReserveStock(orderItemsDTOS, tempOrderId, 0L);
+                    throw new BusinessException(e.getMessage());
                 }
-            } catch (Exception e) {
-                // 回退redis
-                // 回退订单 此时没有映射表，orderId随意给
-                rollBackReserveStock(orderItemsDTOS,tempOrderId,0L);
+
+                // 4 计算商品小计，累加总金额,生成订单项
+                BigDecimal productPrice = product.getPrice(); // 下单时的单价快照
+                Integer quantity = orderItemsDTO.getQuantity();
+                BigDecimal subtotal = productPrice.multiply(new BigDecimal(quantity)); // 单价×数量
+
+                // 5. 创建订单项实体类
+                OrderItems orderItems = new OrderItems();
+                orderItems.setProductId(product.getId());
+                orderItems.setMerchantId(merchantId);
+                orderItems.setQuantity(quantity);
+                orderItems.setSubtotal(subtotal);
+                orderItems.setProductName(product.getName());
+                orderItems.setProductPrice(productPrice);
+                // 注意： 还有orderId没有添加，需要在添加订单后获取
+                orderItemsList.add(orderItems);
+
+                // 计算总价格
+                totalAmount = totalAmount.add(subtotal);
+            }
+
+            log.info("订单校验成功，开始计算金额生成订单");
+
+            // 获取订单信息
+            Orders orders = BeanUtil.copyProperties(ordersDTO,Orders.class);
+            // 获取订单号
+            long orderNumber = redisIdWorker.nextId(RedisConstants.SHOPPING_PREFIX);
+            orders.setOrderNumber(String.valueOf(orderNumber));
+            orders.setOrderedTime(LocalDateTime.now());
+            orders.setMerchantId(merchantId);
+            orders.setUserId(userId);
+            orders.setStatus(OrderStatus.PENDING);// 生成订单，待支付
+            orders.setTotalAmount(totalAmount);
+            orders.setPaymentStatus(PaymentStatus.PENDING);
+            orders.setRemark(ordersDTO.getRemark()); //订单备注
+
+            // 6. 事务内保存订单和订单项（确保数据一致性）
+            try {
+                this.save(orders);
+                final Long id = orders.getId();
+                if(id==null){
+                    throw new BusinessException("订单添加失败");
+                }
+
+                // 将orderId 加入 tempOrderId map映射表
+                redisTemplate.opsForHash().put(ORDER_ID_MAP_TO_TEMP_ID,String.valueOf(id),tempOrderId);
+
+                // 将orderId 和 过期时间戳加入延时检测器 10分钟后过期
+                redisTemplate.opsForZSet().add(ORDER_TIMEOUT_TRIGGER,String.valueOf(id),System.currentTimeMillis()+1000*60*10);
+
+                orderItemsList.forEach(item -> item.setOrderId(id));
+                final boolean saved = orderItemsService.saveBatch(orderItemsList);
+                if(!saved) throw new BusinessException("订单添加失败");
+
+                // 创建订单成功,设置
+
+                // 发布下单事件 — B3 step6 触发长期记忆重算;AFTER_COMMIT 阶段由 UserMemoryEventListener 接收
+                applicationEventPublisher.publishEvent(
+                        new com.scutmmq.ai.event.OrderPlacedEvent(this, orders.getUserId(), id, java.time.Instant.now()));
+
+                // 返回信息给前端
+                AddOrdersVO addOrdersVO = new AddOrdersVO();
+                addOrdersVO.setOrderId(id);
+                addOrdersVO.setOrderNumber(String.valueOf(orderNumber));
+                addOrdersVO.setTotalAmount(totalAmount);
+                addOrdersVO.setPaymentAmount(totalAmount);
+                return Result.success(addOrdersVO);
+            }catch (Exception e){
+                // DB保存异常时回滚预占库存，防止幽灵库存悬挂
+                rollBackReserveStock(orderItemsDTOS, tempOrderId, 0L);
                 throw new BusinessException(e.getMessage());
-            } finally {
-                if(isLock){
-                    lock.unlock();
-                    log.info("释放锁{}成功",key);
-                }
             }
-            log.info("订单商品预占库存校验成功");
-            // 4 计算商品小计，累加总金额,生成订单项
-            BigDecimal productPrice = product.getPrice(); // 下单时的单价快照
-            Integer quantity = orderItemsDTO.getQuantity();
-            BigDecimal subtotal = productPrice.multiply(new BigDecimal(quantity)); // 单价×数量
-
-            // 5. 创建订单项实体类
-            OrderItems orderItems = new OrderItems();
-            orderItems.setProductId(product.getId());
-            orderItems.setMerchantId(merchantId);
-            orderItems.setQuantity(quantity);
-            orderItems.setSubtotal(subtotal);
-            orderItems.setProductName(product.getName());
-            orderItems.setProductPrice(productPrice);
-            // 注意： 还有orderId没有添加，需要在添加订单后获取
-            orderItemsList.add(orderItems);
-
-            // 计算总价格
-            totalAmount = totalAmount.add(subtotal);
-        }
-
-        log.info("订单校验成功，开始计算金额生成订单");
-
-        // 获取订单信息
-        Orders orders = BeanUtil.copyProperties(ordersDTO,Orders.class);
-        // 获取订单号
-        long orderNumber = redisIdWorker.nextId(RedisConstants.SHOPPING_PREFIX);
-        orders.setOrderNumber(String.valueOf(orderNumber));
-        orders.setOrderedTime(LocalDateTime.now());
-        orders.setMerchantId(merchantId);
-        orders.setUserId(userId);
-        orders.setStatus(OrderStatus.PENDING);// 生成订单，待支付
-        orders.setTotalAmount(totalAmount);
-        orders.setPaymentStatus(PaymentStatus.PENDING);
-        orders.setRemark(ordersDTO.getRemark()); //订单备注
-
-        // 6. 事务内保存订单和订单项（确保数据一致性）
-        try {
-            this.save(orders);
-            final Long id = orders.getId();
-            if(id==null){
-                throw new BusinessException("订单添加失败");
+        } finally {
+            if (submitLock.isHeldByCurrentThread()) {
+                submitLock.unlock();
             }
-
-            // 将orderId 加入 tempOrderId map映射表
-            redisTemplate.opsForHash().put(ORDER_ID_MAP_TO_TEMP_ID,String.valueOf(id),tempOrderId);
-
-            // 将orderId 和 过期时间戳加入延时检测器 10分钟后过期
-            redisTemplate.opsForZSet().add(ORDER_TIMEOUT_TRIGGER,String.valueOf(id),System.currentTimeMillis()+1000*60*10);
-
-            orderItemsList.forEach(item -> item.setOrderId(id));
-            final boolean saved = orderItemsService.saveBatch(orderItemsList);
-            if(!saved) throw new BusinessException("订单添加失败");
-
-            // 创建订单成功,设置
-
-            // 发布下单事件 — B3 step6 触发长期记忆重算;AFTER_COMMIT 阶段由 UserMemoryEventListener 接收
-            applicationEventPublisher.publishEvent(
-                    new com.scutmmq.ai.event.OrderPlacedEvent(this, orders.getUserId(), id, java.time.Instant.now()));
-
-            // 返回信息给前端
-            AddOrdersVO addOrdersVO = new AddOrdersVO();
-            addOrdersVO.setOrderId(id);
-            addOrdersVO.setOrderNumber(String.valueOf(orderNumber));
-            addOrdersVO.setTotalAmount(totalAmount);
-            addOrdersVO.setPaymentAmount(totalAmount);
-            return Result.success(addOrdersVO);
-        }catch (Exception e){
-            throw new BusinessException(e.getMessage());
         }
     }
 
