@@ -204,21 +204,21 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Orders> implement
 
             log.info("订单校验成功，开始计算金额生成订单");
 
-            // 获取订单信息
-            Orders orders = BeanUtil.copyProperties(ordersDTO,Orders.class);
-            // 获取订单号
-            long orderNumber = redisIdWorker.nextId(RedisConstants.SHOPPING_PREFIX);
-            orders.setOrderNumber(String.valueOf(orderNumber));
-            orders.setOrderedTime(LocalDateTime.now());
-            orders.setMerchantId(merchantId);
-            orders.setUserId(userId);
-            orders.setStatus(OrderStatus.PENDING);// 生成订单，待支付
-            orders.setTotalAmount(totalAmount);
-            orders.setPaymentStatus(PaymentStatus.PENDING);
-            orders.setRemark(ordersDTO.getRemark()); //订单备注
-
-            // 6. 事务内保存订单和订单项（确保数据一致性）
+            // 6. 事务内保存订单和订单项（任何异常均回滚 Redis 预占库存，确保数据一致性）
             try {
+                // 获取订单信息
+                Orders orders = BeanUtil.copyProperties(ordersDTO,Orders.class);
+                // 获取订单号
+                long orderNumber = redisIdWorker.nextId(RedisConstants.SHOPPING_PREFIX);
+                orders.setOrderNumber(String.valueOf(orderNumber));
+                orders.setOrderedTime(LocalDateTime.now());
+                orders.setMerchantId(merchantId);
+                orders.setUserId(userId);
+                orders.setStatus(OrderStatus.PENDING);// 生成订单，待支付
+                orders.setTotalAmount(totalAmount);
+                orders.setPaymentStatus(PaymentStatus.PENDING);
+                orders.setRemark(ordersDTO.getRemark()); //订单备注
+
                 this.save(orders);
                 final Long id = orders.getId();
                 if(id==null){
