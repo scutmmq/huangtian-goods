@@ -104,10 +104,7 @@
 * **拥塞控制（网络全局）**：
   * **目的**：防止发送方把过多数据塞入整个网络路由器，导致网络交换机队列溢出并雪崩丢包。
   * **经典四步算法（CUBIC 传统流派）**：
-    1. **慢启动（Slow Start）**：拥塞窗口 $cwnd$ 从 1 开始呈**指数级爆炸增长**（$1 
-ightarrow 2 
-ightarrow 4 
-ightarrow 8$）；
+    1. **慢启动（Slow Start）**：拥塞窗口 $cwnd$ 从 1 开始呈**指数级爆炸增长**（$1 \to 2 \to 4 \to 8$）；
     2. **拥塞避免（Congestion Avoidance）**：当 $cwnd$ 达到慢启动阈值 $ssthresh$ 时，改为**线性加法增大**（+1）；
     3. **拥塞发生（Fast Retransmit）**：一旦发生丢包，阈值 $ssthresh$ 砍半；
     4. **快恢复（Fast Recovery）**：$cwnd$ 设置为减半后的阈值，快速恢复数据传输。
@@ -179,10 +176,7 @@ ightarrow 8$）；
 
 ---
 
-### Q5：HTTP 协议全景演进：HTTP 1.0 $
-ightarrow$ 1.1 $
-ightarrow$ 2.0 $
-ightarrow$ 3.0 (QUIC)
+### Q5：HTTP 协议全景演进：HTTP 1.0 $\to$ 1.1 $\to$ 2.0 $\to$ 3.0 (QUIC)
 
 #### 1. HTTP 1.0 $
 ightarrow$ 1.1（从无状态短连接到长连接）
