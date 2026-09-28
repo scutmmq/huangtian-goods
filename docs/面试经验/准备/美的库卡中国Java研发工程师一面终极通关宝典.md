@@ -17,7 +17,7 @@
   - [Q4：上位机调度系统与硬件通信时，TCP 粘包与半包是如何解决的？（TLV 变长协议设计）](#q4上位机调度系统与硬件通信时tcp-粘包与半包是如何解决的tlv-变长协议设计)
 - [模块四：Java 核心八股与三大件底层硬核必问（拒绝模棱两可，讲清物理机制）](#模块四java-核心八股与三大件底层硬核必问拒绝模棱两可讲清物理机制)
   - [Q5：1000 个键值对存入 HashMap，如何初始化容量才不会频繁扩容？（数学推导 2048）](#q51000-个键值对存入-hashmap如何初始化容量才不会频繁扩容数学推导-2048)
-  - [Q6：专属业务线程池参数到底怎么配？为什么核心和最大设为 8？（硬件物理瓶颈推导）](#q6专属业务线程池参数到底怎么配为什么核心和最大设为-8硬件物理瓶颈推导)
+  - [Q6：专属业务线程池七大参数严谨配置、两种推导体系（QPS 理论推导 vs 硬件物理约束）与拒绝策略大揭秘](#q6专属业务线程池七大参数严谨配置两种推导体系qps-理论推导-vs-硬件物理约束与拒绝策略大揭秘)
   - [Q7：丢给线程池的任务执行过长或卡死了，系统如何发现和自愈？](#q7丢给线程池的任务执行过长或卡死了系统如何发现和自愈)
   - [Q8：MySQL 千万级大表 B+ 树高度是多少？为什么只有 3 层？慢查询如何排查？](#q8mysql-千万级大表-b-树高度是多少为什么只有-3-层慢查询如何排查)
   - [Q9：如何保证 Redis 缓存与 MySQL 数据库的双写最终一致性？（Cache-Aside + Canal）](#q9如何保证-redis-缓存与-mysql-数据库的双写最终一致性cache-aside--canal)
@@ -164,14 +164,122 @@
 
 ---
 
-### Q6：专属业务线程池参数到底怎么配？为什么核心和最大设为 8？（硬件物理瓶颈推导）
+### Q6：专属业务线程池七大参数严谨配置、两种推导体系（QPS 理论推导 vs 硬件物理约束）与拒绝策略大揭秘
 
-* 💡 **回答要点**：
-  * **参数**：`corePoolSize = 8`, `maximumPoolSize = 8`, `ArrayBlockingQueue(500)`, `CallerRunsPolicy`；
-  * **为什么不是几十？**：
-    1. **下游边缘设备硬件限制**：海康摄像头与边缘流媒体网关芯片硬件解码并发上限就是 8~16 路 RTSP 码流，开多了端口带宽塞满、摄像头 CPU 打满花屏断流；
-    2. **内存防线**：每张高清抓拍图片解码为 RGB 像素矩阵占用 4~8MB，8 并发控制在 60MB 内存；若开 64 并发直接占用 500MB+ 内存引发频繁 GC；
-    3. **CallerRunsPolicy**：队列满时由调度主线程自己执行，形成**天然的反压限流（Backpressure）**，强行减缓生产速度。
+---
+
+#### 1. 核心与最大线程数、队列容量的两套推导体系
+
+##### 体系一：互联网高并发服务通用标准（基于 Little's Law 利特尔法则与 QPS/RT 数学推导）
+> 💡 **核心定理**：系统中平均处理的任务数 = 任务到达速率（QPS） $\times$ 单个任务平均响应时间（RT）。
+
+* **业务假设**：单机平峰流量 **200 QPS**，突发高峰 **500 QPS**，单个任务平均处理耗时（RT）为 **50ms (0.05s)**。
+1. **核心线程数（`corePoolSize`）—— 按平峰 QPS 推导**：
+   * 单线程每秒可处理任务数：$1\text{s} / 0.05\text{s} = 20\text{ 个/秒}$；
+   * 为确保平峰期所有任务均能被常驻核心工人立即处理、零排队等待：
+     $$\text{corePoolSize} = \text{平峰 QPS} \times \text{RT} = 200 \times 0.05 = \mathbf{10}$$
+2. **任务队列容量（`workQueue Capacity`）—— 按最大可容忍排队等待延迟推导**：
+   * 严禁设为无界（避免 OOM）！但也不能过大，否则任务在队列中排队过久超时；
+   * 设定业务允许在队列中最大排队延迟为 **1 秒**：
+     $$\text{QueueCapacity} = \text{平峰 QPS} \times \text{最大容忍延迟} = 200 \times 1\text{s} = \mathbf{200}$$
+3. **最大线程数（`maximumPoolSize`）—— 按极端高峰 QPS 冲刺推导**：
+   * 当大促流量激增至高峰 500 QPS，队列打满后，必须启动临时工作线程全力抗洪：
+     $$\text{maximumPoolSize} = \text{高峰 QPS} \times \text{RT} = 500 \times 0.05 = \mathbf{25}$$
+
+##### 体系二：物联网/边缘设备/硬件约束型（以视频巡检与机器人上位机拉流为例）
+* **为什么此时不能盲目按公式设为 50 或 100？**
+  1. **下游边缘设备硬件解码上限**：海康摄像头与边缘流媒体网关芯片，单机硬件解码并发通道上限通常只有 **8~16 路 RTSP 码流**。超出上限会导致摄像头端口带宽塞满、芯片过载花屏或硬重置断流；
+  2. **JVM 堆内存 RGB 展开防线**：单张高清抓拍图片在 JVM 堆内解码为 RGB 像素矩阵需要消耗 4~8MB 内存。8 个并发占用约 60MB 内存；若盲目开到 64 并发，瞬间吞噬 500MB+ 堆内存，直接引发高频 Young GC 甚至内存溢出；
+  3. **参数定调**：`corePoolSize = 8, maximumPoolSize = 8`（核心与最大设为一致，避免无谓的频繁启停线程内核上下文切换）。
+
+> 🗣️ **架构师级回答套路**：  
+> *“在通用高并发后端开发中，我通常依据 Little's Law，结合平峰/高峰 QPS 和平均任务响应时间 RT 来进行严密的数学公式推导；而在具体落地到视频巡检与边缘设备拉流场景时，系统的上限受限于下游边缘芯片硬件解码通道（8~16 路）以及图像解码的堆内存开销，因此我将核心和最大线程数严谨收敛至 8。”*
+
+---
+
+#### 2. ThreadPoolExecutor 七大参数逐个选型与底层物理原因
+
+```java
+public ThreadPoolExecutor(
+    int corePoolSize,                   // 1. 核心线程数
+    int maximumPoolSize,                // 2. 最大线程数
+    long keepAliveTime,                 // 3. 空闲存活时间
+    TimeUnit unit,                      // 4. 存活时间单位
+    BlockingQueue<Runnable> workQueue,  // 5. 任务阻塞队列
+    ThreadFactory threadFactory,        // 6. 线程工厂
+    RejectedExecutionHandler handler    // 7. 拒绝策略
+)
+```
+
+| 参数序号 | 参数名 | 典型配置 | 为什么这么选？底层物理机制与踩坑经验 |
+| :---: | :--- | :--- | :--- |
+| **1** | `corePoolSize` | 8 ~ 16 | **常驻核心员工**。即使平时空闲也不被回收，杜绝频繁创建/销毁线程的 OS 内核开销；结合平峰 QPS 或硬件上限决定。 |
+| **2** | `maximumPoolSize` | 8（硬件受限）或 $2\sim 3\times\text{Core}$ | **允许容纳的最大总人数**。硬件受限场景核心与最大设为一致防抖动；高弹性互联网业务设为峰值抗洪倍数。 |
+| **3** | `keepAliveTime` | 30 ~ 60 | **临时工解雇倒计时**。高峰过去后空闲非核心线程退出的等待时间。 |
+| **4** | `unit` | `TimeUnit.SECONDS` | 存活时间单位。选择秒级（如 60s），太短导致频繁销毁与重建，太长浪费系统句柄。 |
+| **5** | `workQueue` | `new ArrayBlockingQueue<>(500)` | **必须是有界队列！**<br>❌ 严禁使用 `LinkedBlockingQueue` 默认无界构造器（默认容量为 $2^{31}-1$，生产流量洪峰直接打出 OOM）！<br>✅ 首选 `ArrayBlockingQueue`：底层基于连续数组，GC 友好，零额外 Node 链表指针内存开销；容量依容忍延迟推导。 |
+| **6** | `threadFactory` | 自定义工厂（命名） | **必须显式设置有意义的线程名称！**<br>❌ 严禁使用默认的 `Executors.defaultThreadFactory()`（生成的线程名字全是 `pool-1-thread-1`，线上通过 `jstack` 排障根本分不清是哪个业务在卡死）；<br>✅ 自定义前缀如 `"patrol-worker-%d"`，并统一设置非守护线程与 `UncaughtExceptionHandler` 捕获异常。 |
+| **7** | `handler` | 见下方详细策略 | **饱和防御底线**。队列与最大线程均打满时的自救或兜底措施。 |
+
+---
+
+#### 3. 四大原生拒绝策略对比与优缺点
+
+1. **`AbortPolicy`（JDK 默认）**：
+   * **行为**：直接抛出 `RejectedExecutionException` 运行时异常；
+   * **适用**：上游必须明确感知失败并进行事务回滚的核心主链路（如订单交易）；缺点是会打断提交方流程。
+2. **`CallerRunsPolicy`（调用方主线程代跑，生产最推荐）**：
+   * **行为**：线程池不干了，由提交任务的主线程（如 HTTP 请求线程或 XXL-JOB 调度线程）亲自同步执行该任务；
+   * **神级价值**：**天然的反压限流机制（Backpressure）**！主线程去跑任务需要耗时，在此期间无法继续提交新任务，给线程池争取了宝贵的缓冲消化时间，且**绝对不丢失任何任务**！
+3. **`DiscardPolicy`（静默丢弃）**：
+   * **行为**：直接把新任务扔掉，不抛异常也不执行；
+   * **适用**：非关键、允许丢弃的旁路数据，如日志埋点、弱指标统计。
+4. **`DiscardOldestPolicy`（喜新厌旧，丢弃队首老任务）**：
+   * **行为**：从阻塞队列头部弹出等待最久的老任务丢弃，尝试将新任务重新入队；
+   * **适用**：**时效性极强、新数据必然替代旧数据的场景**，例如**机器人/AGV 实时高频坐标上报、视频直播最新帧渲染**（旧坐标已失效，新坐标才具备指导避障价值）。
+
+---
+
+#### 4. 大厂生产级 4 大经典“自定义拒绝策略”（高薪亮点）
+
+##### ① 本地死信队列与持久化补偿策略（任务绝对零丢失）
+* **原理**：当线程池打满时，将任务核心参数序列化为 JSON，落盘至 **Redis 延迟队列** 或 **MySQL 本地死信补偿表（`t_task_dead_letter`）**，状态置为 `REJECTED`；
+* **闭环**：触发 Prometheus 告警，后台起补偿定时任务在业务低峰期捞出重试，彻底杜绝数据丢失。
+```java
+public class PersistentDeadLetterPolicy implements RejectedExecutionHandler {
+    @Override
+    public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
+        log.warn("线程池全满，任务进入本地死信补偿队列...");
+        Metrics.counter("threadpool.rejected.count").increment();
+        deadLetterService.saveForRetry(r); // 持久化落库或推入 Redis 延迟队列
+    }
+}
+```
+
+##### ② 阻塞等待重试策略（BlockingWaitPolicy，生产端不放弃）
+* **原理**：默认 `offer()` 是非阻塞的，自定义策略改为调用 `queue.offer(r, 2, TimeUnit.SECONDS)`，让调用方线程在此**阻塞等待 2 秒**。只要在 2 秒内队列有空位被消费，任务就能顺利进队，超时仍满才触发降级。
+```java
+public class BlockingWaitPolicy implements RejectedExecutionHandler {
+    @Override
+    public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
+        try {
+            if (!executor.getQueue().offer(r, 2, TimeUnit.SECONDS)) {
+                log.error("等待 2 秒队列依然满载，触发降级熔断！");
+                fallbackService.degrade(r);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+}
+```
+
+##### ③ 阿里 Dubbo 的 JStack 案发现场保留策略（`AbortPolicyWithReport`）
+* **原理**：线上线程池打满往往是因为**个别慢 SQL 或死锁卡死了所有 Worker 线程**。传统拒绝策略直接报错，案发现场全无；
+* **Dubbo 解法**：在抛出异常前，**自动触发一次 `jstack` 将当前 JVM 线程堆栈 Dump 到磁盘日志文件**（加频控锁，限制 10 分钟最多 Dump 一次，防止刷爆磁盘）。后续顺着日志一眼定位卡死代码行。
+
+##### ④ 查询类降级兜底策略（Fallback）
+* **原理**：用于前端只读聚合接口。线程池饱和时，直接返回本地缓存（Caffeine）中的历史旧值或系统默认静态 Mock 数据，确保前端界面不白屏、不报错，完成服务优雅降级。
 
 ---
 
